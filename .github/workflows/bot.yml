@@ -8,31 +8,104 @@ on:
         required: true
         default: true
         type: boolean
-      listen_minutes:
-        description: 'Minutos de escucha (1 a 180; usa 1 para la primera prueba)'
+      audio_source_validated:
+        description: 'Marca solo tras confirmar en DRY_RUN que se oye tu micrófono y no otras fuentes'
         required: true
-        default: 1
-        type: number
+        default: false
+        type: boolean
+      personality:
+        description: 'Estilo conversacional de Mari'
+        required: true
+        default: mixta
+        type: choice
+        options:
+          - mixta
+          - compa
+          - tranquila
+          - observadora
+          - propia
+      personality_notes:
+        description: 'Rasgos para el estilo propio de Mari (opcional)'
+        required: false
+        default: 'buena onda, observadora y con humor sutil'
+        type: string
+      personality_sebas:
+        description: 'Estilo conversacional de Sebas'
+        required: true
+        default: mixta
+        type: choice
+        options:
+          - mixta
+          - compa
+          - tranquila
+          - observadora
+          - propia
+      personality_notes_sebas:
+        description: 'Rasgos para el estilo propio de Sebas (opcional)'
+        required: false
+        default: 'relajado, gamer, directo y con humor seco'
+        type: string
+      interaction_mode:
+        description: 'Cuándo debe intervenir alguno de los bots'
+        required: true
+        default: natural
+        type: choice
+        options:
+          - natural
+          - solo_mari
+          - solo_sebas
+          - named_viewer
+          - open_chat
+          - direct_chat
+          - silent
+      max_messages_per_6h:
+        description: 'Límite total de mensajes en seis horas'
+        required: true
+        default: '18'
+        type: choice
+        options:
+          - '6'
+          - '12'
+          - '18'
+      follow_streamer:
+        description: 'Hacer que cada cuenta siga el canal si aún no lo sigue'
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 185
+    timeout-minutes: 120
     concurrency:
-      group: starvios-chat-bot
+      group: assistant-gg-live-chat
       cancel-in-progress: false
     env:
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       STARVIOS_SESSION_COOKIE: ${{ secrets.STARVIOS_SESSION_COOKIE }}
+      STARVIOS_SESSION_COOKIE_2: ${{ secrets.STARVIOS_SESSION_COOKIE_2 }}
       CHAT_INPUT_SELECTOR: ${{ secrets.CHAT_INPUT_SELECTOR }}
       CHAT_SEND_SELECTOR: ${{ secrets.CHAT_SEND_SELECTOR }}
       CHAT_MESSAGE_SELECTOR: ${{ secrets.CHAT_MESSAGE_SELECTOR }}
       CHAT_USERNAME_SELECTOR: ${{ secrets.CHAT_USERNAME_SELECTOR }}
-      LISTEN_MINUTES: ${{ inputs.listen_minutes }}
+      LISTEN_MINUTES: '60'
       DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      AUDIO_SOURCE_VALIDATED: ${{ inputs.audio_source_validated || 'false' }}
+      AUDIO_BRIDGE_URL: ${{ secrets.AUDIO_BRIDGE_URL }}
+      AUDIO_BRIDGE_TOKEN: ${{ secrets.AUDIO_BRIDGE_TOKEN }}
+      PERSONALITY: ${{ inputs.personality }}
+      CUSTOM_PERSONALITY: ${{ inputs.personality_notes }}
+      PERSONALITY_SEBAS: ${{ inputs.personality_sebas }}
+      CUSTOM_PERSONALITY_SEBAS: ${{ inputs.personality_notes_sebas }}
+      INTERACTION_MODE: ${{ inputs.interaction_mode }}
+      MAX_MESSAGES_PER_6H: ${{ inputs.max_messages_per_6h }}
+      FOLLOW_STREAMER: ${{ inputs.follow_streamer || 'false' }}
+      GITHUB_TOKEN: ${{ github.token }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
     steps:
       - name: Checkout del código
         uses: actions/checkout@v4
@@ -50,6 +123,15 @@ jobs:
 
       - name: Ejecutar bot
         run: python bots.py
+
+      - name: Guardar límite de frecuencia para la próxima ejecución
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: assistant-gg-rate-limit-state
+          path: rate_limit_state.json
+          if-no-files-found: ignore
+          retention-days: 1
 
       - name: Subir captura de diagnóstico
         if: failure()
