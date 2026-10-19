@@ -6,8 +6,13 @@ on:
       dry_run:
         description: 'Solo prueba el borrador sin publicarlo'
         required: true
-        default: false
+        default: true
         type: boolean
+      listen_minutes:
+        description: 'Minutos de escucha (1 a 180; usa 1 para la primera prueba)'
+        required: true
+        default: 1
+        type: number
 
 permissions:
   contents: read
@@ -15,7 +20,7 @@ permissions:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 185
     concurrency:
       group: starvios-chat-bot
       cancel-in-progress: false
@@ -25,7 +30,8 @@ jobs:
       CHAT_INPUT_SELECTOR: ${{ secrets.CHAT_INPUT_SELECTOR }}
       CHAT_SEND_SELECTOR: ${{ secrets.CHAT_SEND_SELECTOR }}
       CHAT_MESSAGE_SELECTOR: ${{ secrets.CHAT_MESSAGE_SELECTOR }}
-      STREAM_TRANSCRIPT_SELECTOR: ${{ secrets.STREAM_TRANSCRIPT_SELECTOR }}
+      CHAT_USERNAME_SELECTOR: ${{ secrets.CHAT_USERNAME_SELECTOR }}
+      LISTEN_MINUTES: ${{ inputs.listen_minutes }}
       DRY_RUN: ${{ inputs.dry_run || 'false' }}
     steps:
       - name: Checkout del código
