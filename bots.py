@@ -823,12 +823,16 @@ async def ciclo_bot() -> None:
                                 print(f"⚠️ No se pudo analizar un fotograma ({type(error_vision).__name__}).")
                                 vision_warning_logged = True
                 elif stream_sin_senal_desde is None:
+                    contexto_visual = ""
                     stream_sin_senal_desde = ahora_mono
                 elif ahora_mono - stream_sin_senal_desde >= STREAM_END_GRACE_SECONDS:
+                    contexto_visual = ""
                     resumen["estado_stream"] = "sin reproductor activo durante 3 minutos; ejecución cerrada"
                     registrar_evento(resumen, "omitidos", "El reproductor no mostró actividad durante 3 minutos.")
                     print("📴 No se detecta reproducción desde hace 3 minutos; se cierra el ciclo.")
                     break
+                else:
+                    contexto_visual = ""
                 for actor_id, actor in actores.items():
                     if DRY_RUN:
                         continue
