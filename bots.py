@@ -54,9 +54,9 @@ async def mover_y_escribir(pagina, selector_input, texto):
 async def obtener_contexto_stream(pagina):
     try:
         titulo_stream = await pagina.locator("h1").first.inner_text()
-        return f"Stream actual de Goyomon. Título/Info: {titulo_stream}"
+        return f"Stream actual de bryan_. Título/Info: {titulo_stream}"
     except Exception:
-        return "Transmisión en vivo de Goyomon en Starvios jugando Dota 2."
+        return "Transmisión en vivo de bryan_ en Starvios jugando Dota 2."
 
 async def generar_comentario_groq(contexto_pagina):
     system_prompt = (
@@ -125,11 +125,13 @@ async def ciclo_bot():
         contexto_actual = await obtener_contexto_stream(pagina)
         frase_ia = await generar_comentario_groq(contexto_actual)
         
-        selector_input = 'input[placeholder*="mensaje"], textarea[placeholder*="mensaje"]'
+        selector_input = 'input[placeholder*="mensaje"], input[placeholder*="Chat"], textarea, div[contenteditable="true"]'
         exito = await mover_y_escribir(pagina, selector_input, frase_ia)
         
         if exito:
             print(f"💬 [IA en Chat]: {frase_ia}")
+        else:
+            print("⚠️ No se encontró la caja de texto para escribir el mensaje.")
         
         await pausa(pagina, 5000, 8000)
         await navegador.close()
