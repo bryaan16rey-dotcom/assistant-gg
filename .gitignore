@@ -1,6 +1,6 @@
 chrome_user_data/
+cloudflare/
 __pycache__/
 *.py[cod]
 resultado_chat.png
 .env
-

@@ -1,7 +1,8 @@
 # Mari1565 y Sebas: prueba de audio
 
 El workflow se inicia manualmente en GitHub Actions y dura hasta 60 minutos.
-Mari y Sebas usan cookies independientes y escriben en sus propias cuentas.
+Cada bot configurado usa una sesión independiente de Supabase y escribe en su
+propia cuenta. Puedes empezar con una sola cuenta y añadir la otra después.
 Para esta versión no se manda video ni capturas a Groq: el contexto hablado
 proviene únicamente del micrófono que OBS envía a VB-CABLE. El bot también lee
 los mensajes visibles del chat para entender a quién respondes; no procesa la
@@ -11,18 +12,23 @@ imagen del directo.
 
 - Mari reconoce “Mari”, “Mari1565”, “María”, “María Fernanda” y “Mafer”. Sebas
   reconoce “Sebas”, “Sebastián”, “el Sebas” y “sebasdark”.
-- Los dos comparten transcripción reciente y chat. Si llamas a uno por su nombre,
-  solo ese toma el turno; si ya respondiste, no repiten la respuesta.
+- Los bots configurados comparten transcripción reciente y chat. Si llamas a uno
+  por su nombre, solo ese toma el turno; si ya respondiste, no repiten la respuesta.
 - El estilo casual evita saludos genéricos al público, mensajes de bienvenida y
-  moderación. Ambos se identifican como cuentas automatizadas.
+  moderación. Cada bot se identifica como una cuenta automatizada.
 - Mari espera normalmente 8–12 minutos entre mensajes; Sebas 13–17 minutos.
   Además hay al menos 3 minutos entre mensajes de cualquiera y un límite
   compartido configurable de 6, 12 o 18 mensajes cada seis horas (por defecto 18).
-- El workflow muestra horarios aleatorios de entrada y salida: Mari entra
-  2–5 minutos después de iniciar; Sebas, 19–25 minutos después de Mari.
-- En `dry_run`, puede leer el chat y preparar un borrador, pero no publica ni
-  sigue el canal. Mantén `audio_source_validated=false` hasta confirmar que solo
-  se transcribe tu voz.
+- El workflow muestra horarios aleatorios de entrada y salida. Si hay dos
+  cuentas, Mari entra 2–5 minutos después de iniciar y Sebas 19–25 minutos
+  después de Mari. Si solo hay una, ese bot entra 2–5 minutos después de iniciar
+  y permanece 50–65 minutos.
+- En `dry_run`, puede leer el chat y preparar un borrador, pero no publica.
+  Mantén `audio_source_validated=false` hasta confirmar que solo se transcribe
+  tu voz.
+- Las cuentas se identifican como automatizadas en cada mensaje. No se automatiza
+  el seguimiento ni se simula actividad humana: los términos de Starvios prohíben
+  inflar seguidores con bots o cuentas falsas.
 
 ## Privacidad y límites del puente temporal
 
@@ -40,6 +46,11 @@ El bot transcribe el audio con Groq; las imágenes del directo no se envían a
 ningún modelo. Las palabras transcritas y borradores no aparecen en los logs
 públicos de Actions. La URL temporal se introduce como entrada del workflow y
 `AUDIO_BRIDGE_TOKEN` permanece como GitHub Actions secret.
+
+Las sesiones configuradas se guardan como secretos de GitHub. Contienen tokens
+de acceso y de renovación: no las pegues en el chat, en un issue ni en un
+archivo del repositorio. Si una sesión se filtra, ciérrala desde Starvios y
+exporta una nueva.
 
 ## 1. Instalar VB-CABLE y aislar el micrófono en OBS
 
@@ -110,9 +121,10 @@ imprime `cloudflared`. No añadas rutas como `/v1/audio`.
 
 1. Inicia tu directo y verifica que OBS recibe solo el micrófono en el cable.
 2. En GitHub abre **Actions → Starvios chat bot → Run workflow**.
-3. Para la primera prueba usa `dry_run=true`, `audio_source_validated=false` y
-   `follow_streamer=false`; pega la URL temporal completa en
-   `audio_bridge_url`. Puedes dejar el modo de interacción `natural`.
+3. Para la primera prueba usa `dry_run=true` y `audio_source_validated=false`;
+   pega la URL temporal completa en `audio_bridge_url`. Si solo tienes la cuenta
+   de Mari, elige `interaction_mode=solo_mari` para que la prueba no dependa de
+   la cuenta de Sebas. Si tienes las dos, puedes usar `natural`.
 4. Di una frase clara, por ejemplo: “Mari, esto es una prueba de audio”.
    Comprueba en Actions que recibe transcripción y genera un borrador; el texto
    no se revela en los logs y no se publica ningún mensaje.
@@ -124,17 +136,92 @@ un túnel nuevo y vuelve a pegar su nueva URL en el workflow. Para publicar en
 una ejecución posterior, primero valida el audio en `dry_run`; no desactives el
 modo seguro hasta revisar el resultado.
 
+## Cuentas propias y login automático
+
+La forma recomendada es que cada bot tenga su propia cuenta de Starvios y que
+el workflow inicie sesión con email y contraseña al comenzar cada ejecución.
+Así la sesión es nueva y no dependes de reexportar cookies.
+
+Crea estos secretos en GitHub:
+
+- Mari: `STARVIOS_EMAIL_MARI` y `STARVIOS_PASSWORD_MARI`
+- Sebas: `STARVIOS_EMAIL_SEBAS` y `STARVIOS_PASSWORD_SEBAS`
+
+Puedes empezar con una sola cuenta. Si solo configuras Mari, el bot funciona
+solo con Mari; si solo configuras Sebas, solo con Sebas. Deja vacíos los
+secretos del bot que no uses. El modo `natural` usa todas las cuentas
+configuradas; `solo_mari` y `solo_sebas` exigen esa cuenta e ignoran por
+completo la otra, aunque quede una sesión vieja guardada.
+
+El login se hace contra Supabase, igual que el formulario de Starvios. La cuenta
+debe tener el correo confirmado. Si tiene verificación en dos pasos, el login
+automático puede rechazarse; en ese caso usa el JSON de sesión como respaldo.
+En `dry_run`, el bot abre las sesiones configuradas al inicio, así puedes
+comprobar cada cuenta antes de publicar.
+
+Usa cuentas dedicadas a los bots, con contraseñas únicas y sin datos de pago ni
+personales. Los secretos de GitHub están cifrados, pero cualquier workflow con
+acceso a ellos puede leerlos; no reutilices una cuenta personal. El bot nunca
+imprime la contraseña. No envíes contraseñas por chats, issues ni correos: si una
+contraseña se comparte fuera de GitHub Secrets, cámbiala antes de usarla.
+
+Las cuentas deben seguir identificándose como automatizadas. No se automatiza el
+seguimiento de canales ni se simula actividad humana para ocultar que son bots.
+
+## Respaldo: exportar la sesión de Starvios
+
+Si no quieres guardar contraseñas, o si la cuenta tiene 2FA, puedes usar el JSON
+de sesión. Starvios no autentica el chat con una cookie llamada `session`. Es una
+aplicación de Supabase y guarda la sesión en la clave de `localStorage`
+`sb-naiijcvngtkkocligwvk-auth-token`. Por eso el bot inyecta esa sesión antes
+de cargar la página; una cookie del navegador no sirve.
+
+Para cada cuenta, en un perfil de Chrome distinto (o en una ventana de
+incógnito separada):
+
+1. Entra en `https://starvios.com/auth` e inicia sesión con la cuenta.
+2. Abre **DevTools → Console**.
+3. Ejecuta este comando para copiar el JSON completo al portapapeles:
+
+   ```js
+   copy(localStorage.getItem('sb-naiijcvngtkkocligwvk-auth-token'))
+   ```
+
+4. Pega el valor en el secret correspondiente:
+   - Mari: `STARVIOS_SESSION_COOKIE`
+   - Sebas: `STARVIOS_SESSION_COOKIE_2`
+
+El valor debe empezar por `{"access_token":...` e incluir `refresh_token` y
+`user`. No pegues solo el token, una cookie ni el nombre de la clave. Si
+configuras dos cuentas, sus sesiones deben ser distintas; si son iguales, ambas
+publicarían como la misma persona.
+
+La sesión incluye un token de renovación y Supabase puede renovarla durante la
+ejecución. Aun así, Starvios puede revocarla o rotar el token; si una ejecución
+falla con “no se ve el campo de chat”, vuelve a iniciar sesión y exporta un JSON
+nuevo. No escribas contraseñas ni tokens en el repositorio ni en el YAML: usa
+siempre GitHub Secrets.
+
 ## GitHub Actions secrets requeridos
 
 - `GROQ_API_KEY`
-- `STARVIOS_SESSION_COOKIE` (Mari)
-- `STARVIOS_SESSION_COOKIE_2` (Sebas)
 - `CHAT_INPUT_SELECTOR`
 - `CHAT_SEND_SELECTOR`
 - `CHAT_MESSAGE_SELECTOR`
 - `CHAT_USERNAME_SELECTOR`
 - `AUDIO_BRIDGE_TOKEN`
+- Mari: `STARVIOS_EMAIL_MARI` + `STARVIOS_PASSWORD_MARI`
+- Sebas: `STARVIOS_EMAIL_SEBAS` + `STARVIOS_PASSWORD_SEBAS`
+
+Puedes configurar solo una de las dos parejas. Deja vacíos los secretos del bot
+que no uses. Como respaldo, en lugar de las credenciales de una cuenta puedes
+configurar:
+
+- `STARVIOS_SESSION_COOKIE` (JSON de localStorage de Mari)
+- `STARVIOS_SESSION_COOKIE_2` (JSON de localStorage de Sebas)
+
+Si existen email/contraseña y también sesión, se intenta primero el login con
+contraseña y la sesión se usa solo si ese login falla.
 
 La URL `AUDIO_BRIDGE_URL` no es un secret permanente: se pasa como entrada
 `audio_bridge_url` en cada ejecución porque el Quick Tunnel es temporal.
-

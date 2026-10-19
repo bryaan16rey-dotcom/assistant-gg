@@ -71,11 +71,6 @@ on:
           - '6'
           - '12'
           - '18'
-      follow_streamer:
-        description: 'Hacer que cada cuenta siga el canal si aún no lo sigue'
-        required: true
-        default: true
-        type: boolean
 
 permissions:
   contents: read
@@ -90,6 +85,12 @@ jobs:
       cancel-in-progress: false
     env:
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      # Cada bot puede iniciar sesión con su propia cuenta. Si faltan estas
+      # credenciales, se usa el JSON de sesión de localStorage como respaldo.
+      STARVIOS_EMAIL_MARI: ${{ secrets.STARVIOS_EMAIL_MARI }}
+      STARVIOS_PASSWORD_MARI: ${{ secrets.STARVIOS_PASSWORD_MARI }}
+      STARVIOS_EMAIL_SEBAS: ${{ secrets.STARVIOS_EMAIL_SEBAS }}
+      STARVIOS_PASSWORD_SEBAS: ${{ secrets.STARVIOS_PASSWORD_SEBAS }}
       STARVIOS_SESSION_COOKIE: ${{ secrets.STARVIOS_SESSION_COOKIE }}
       STARVIOS_SESSION_COOKIE_2: ${{ secrets.STARVIOS_SESSION_COOKIE_2 }}
       CHAT_INPUT_SELECTOR: ${{ secrets.CHAT_INPUT_SELECTOR }}
@@ -107,7 +108,6 @@ jobs:
       CUSTOM_PERSONALITY_SEBAS: ${{ inputs.personality_notes_sebas }}
       INTERACTION_MODE: ${{ inputs.interaction_mode }}
       MAX_MESSAGES_PER_6H: ${{ inputs.max_messages_per_6h }}
-      FOLLOW_STREAMER: ${{ inputs.follow_streamer || 'false' }}
       GITHUB_TOKEN: ${{ github.token }}
       GITHUB_REPOSITORY: ${{ github.repository }}
     steps:
@@ -145,4 +145,3 @@ jobs:
           path: resultado_chat.png
           if-no-files-found: ignore
           retention-days: 3
-

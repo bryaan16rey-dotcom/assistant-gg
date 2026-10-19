@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import io
 import json
@@ -21,6 +22,9 @@ from playwright.async_api import async_playwright
 URL = "https://starvios.com/live/bryan_"
 HOSTS_PERMITIDOS = {"starvios.com", "www.starvios.com"}
 CAPTURA_DIAGNOSTICO = Path("resultado_chat.png")
+# Starvios es una app de Supabase: la sesión vive en localStorage, no en una
+# cookie llamada "session". Esta clave es la que usa el cliente web.
+STARVIOS_AUTH_STORAGE_KEY = "sb-naiijcvngtkkocligwvk-auth-token"
 
 # No hay valores por defecto: evita escribir en búsqueda u otro campo editable.
 CHAT_INPUT_SELECTOR = os.environ.get("CHAT_INPUT_SELECTOR", "").strip()
@@ -29,8 +33,18 @@ CHAT_MESSAGE_SELECTOR = os.environ.get("CHAT_MESSAGE_SELECTOR", "").strip()
 CHAT_USERNAME_SELECTOR = os.environ.get("CHAT_USERNAME_SELECTOR", "").strip()
 DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() == "true"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+STARVIOS_EMAIL_MARI = os.environ.get("STARVIOS_EMAIL_MARI", "").strip()
+STARVIOS_PASSWORD_MARI = os.environ.get("STARVIOS_PASSWORD_MARI", "").strip()
+STARVIOS_EMAIL_SEBAS = os.environ.get("STARVIOS_EMAIL_SEBAS", "").strip()
+STARVIOS_PASSWORD_SEBAS = os.environ.get("STARVIOS_PASSWORD_SEBAS", "").strip()
+# Los secretos de sesión conservan el nombre histórico "COOKIE", pero su valor
+# debe ser el JSON completo de Supabase guardado en localStorage. Una cookie del
+# navegador no autentica la web.
 STARVIOS_SESSION_COOKIE = os.environ.get("STARVIOS_SESSION_COOKIE", "").strip()
 STARVIOS_SESSION_COOKIE_2 = os.environ.get("STARVIOS_SESSION_COOKIE_2", "").strip()
+# Datos públicos de la app de Supabase que usa Starvios. No son secretos.
+STARVIOS_SUPABASE_URL = "https://naiijcvngtkkocligwvk.supabase.co"
+STARVIOS_SUPABASE_KEY = "sb_publishable_4lF1QyQhWOUE1Pw3rWBwEw_bVmkAxm6"
 LISTEN_MINUTES = os.environ.get("LISTEN_MINUTES", "60").strip()
 BOT_STATE_PATH = Path(os.environ.get("BOT_STATE_PATH", "rate_limit_state.json"))
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
@@ -38,7 +52,6 @@ GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "").strip()
 AUDIO_SOURCE_VALIDATED = os.environ.get("AUDIO_SOURCE_VALIDATED", "false").strip().lower() == "true"
 AUDIO_BRIDGE_URL = os.environ.get("AUDIO_BRIDGE_URL", "").strip().rstrip("/")
 AUDIO_BRIDGE_TOKEN = os.environ.get("AUDIO_BRIDGE_TOKEN", "").strip()
-FOLLOW_STREAMER = os.environ.get("FOLLOW_STREAMER", "true").strip().lower() == "true"
 BOT_NAME = "Mari1565"
 BOT_ALIASES = ("Mari", "Mari1565", "María", "María Fernanda", "Mafer")
 SEBAS_NAME = "sebasdark"
@@ -66,7 +79,206 @@ class AudioCaptureUnavailable(RuntimeError):
     """No fresh microphone audio arrived from the OBS bridge."""
 
 
-def requerir_configuracion() -> None:
+class SesionStarviosInvalida(RuntimeError):
+    """The value stored in GitHub Secrets is not a usable Supabase session."""
+
+
+def carga_util_jwt(token: str) -> dict:
+    """Read the public claims of a JWT without verifying its signature."""
+    try:
+        partes = token.split(".")
+        if len(partes) < 2:
+            return {}
+        relleno = "=" * (-len(partes[1]) % 4)
+        datos = json.loads(base64.urlsafe_b64decode(partes[1] + relleno))
+        return datos if isinstance(datos, dict) else {}
+    except Exception:
+        return {}
+
+
+def normalizar_sesion_starvios(valor: str, etiqueta: str) -> str:
+    """Validate and normalize the Supabase session exported from localStorage.
+
+    Starvios does not authenticate with a browser cookie called "session"; its
+    Supabase client reads the JSON session from localStorage. This function
+    accepts that JSON (optionally prefixed with the storage key) and returns a
+    compact JSON string ready to inject into a Playwright context.
+    """
+    texto = (valor or "").strip()
+    if not texto:
+        raise SesionStarviosInvalida(
+            f"Falta la sesión de {etiqueta}. Configura su JSON de localStorage en GitHub Secrets."
+        )
+
+    prefijo = STARVIOS_AUTH_STORAGE_KEY + "="
+    if texto.startswith(prefijo):
+        texto = texto[len(prefijo):].strip()
+
+    # Some clipboard/export tools wrap the JSON in an extra pair of quotes.
+    if len(texto) >= 2 and texto[0] == '"' and texto[-1] == '"':
+        try:
+            texto = json.loads(texto)
+        except json.JSONDecodeError:
+            pass
+
+    try:
+        datos = json.loads(texto)
+    except json.JSONDecodeError as error:
+        if texto.startswith("eyJ"):
+            detalle = "parece un access_token suelto"
+        elif "session=" in texto.lower() or ";" in texto:
+            detalle = "parece una cookie del navegador"
+        else:
+            detalle = "no es JSON válido"
+        raise SesionStarviosInvalida(
+            f"La sesión de {etiqueta} {detalle}. Starvios no usa la cookie 'session': "
+            f"usa localStorage['{STARVIOS_AUTH_STORAGE_KEY}']. Copia el JSON completo "
+            "con access_token, refresh_token y user desde la consola del navegador."
+        ) from error
+
+    # Tolerate a wrapper such as {"session": {...}} from some export tools.
+    if isinstance(datos, dict) and isinstance(datos.get("session"), dict):
+        datos = datos["session"]
+    if not isinstance(datos, dict):
+        raise SesionStarviosInvalida(
+            f"La sesión de {etiqueta} no es un objeto JSON de Supabase."
+        )
+
+    access_token = str(datos.get("access_token") or "").strip()
+    refresh_token = str(datos.get("refresh_token") or "").strip()
+    if not access_token or not refresh_token:
+        raise SesionStarviosInvalida(
+            f"La sesión de {etiqueta} no incluye access_token y refresh_token. "
+            "Exporta el JSON completo de localStorage; no pegues solo el token ni una cookie."
+        )
+
+    claims = carga_util_jwt(access_token)
+    usuario = datos.get("user")
+    if not isinstance(usuario, dict):
+        usuario = {}
+    if not usuario.get("id") and claims.get("sub"):
+        usuario["id"] = claims["sub"]
+    if not usuario.get("email") and claims.get("email"):
+        usuario["email"] = claims["email"]
+    for clave in ("aud", "role"):
+        if clave not in usuario and clave in claims:
+            usuario[clave] = claims[clave]
+    datos["user"] = usuario
+    if not usuario.get("id"):
+        raise SesionStarviosInvalida(
+            f"La sesión de {etiqueta} no permite identificar al usuario. "
+            "Vuelve a iniciar sesión en Starvios y exporta el JSON de nuevo."
+        )
+
+    if not datos.get("expires_at"):
+        exp = claims.get("exp")
+        if isinstance(exp, (int, float)):
+            datos["expires_at"] = int(exp)
+        elif datos.get("expires_in"):
+            try:
+                datos["expires_at"] = int(time.time() + float(datos["expires_in"]))
+            except (TypeError, ValueError):
+                pass
+    if not datos.get("token_type"):
+        datos["token_type"] = "bearer"
+
+    return json.dumps(datos, ensure_ascii=False, separators=(",", ":"))
+
+
+def detalle_error_login(cuerpo: bytes, codigo: int) -> str:
+    """Translate a Supabase login error without echoing credentials."""
+    try:
+        datos = json.loads(cuerpo.decode("utf-8", "replace"))
+    except Exception:
+        datos = {}
+    if not isinstance(datos, dict):
+        datos = {}
+    mensaje = " ".join(
+        str(datos.get(clave) or "")
+        for clave in ("error", "error_description", "error_code", "msg", "message")
+    ).lower()
+    if "invalid_credentials" in mensaje or "invalid_grant" in mensaje or "invalid login" in mensaje:
+        return "email o contraseña incorrectos"
+    if "email_not_confirmed" in mensaje or "email not confirmed" in mensaje:
+        return "el correo de la cuenta aún no está confirmado"
+    if "mfa" in mensaje or "insufficient_aal" in mensaje or "aal" in mensaje:
+        return "la cuenta requiere verificación en dos pasos; usa el JSON de sesión"
+    if codigo == 429 or "rate_limit" in mensaje or "too many" in mensaje:
+        return "demasiados intentos de login; espera unos minutos"
+    return f"Supabase rechazó el login (HTTP {codigo})"
+
+
+def iniciar_sesion_starvios(email: str, password: str, etiqueta: str) -> str:
+    """Log in to Starvios with the bot's own account and return its session JSON."""
+    solicitud = Request(
+        f"{STARVIOS_SUPABASE_URL}/auth/v1/token?grant_type=password",
+        data=json.dumps({"email": email, "password": password}).encode("utf-8"),
+        headers={
+            "apikey": STARVIOS_SUPABASE_KEY,
+            "Content-Type": "application/json",
+            "User-Agent": "assistant-gg-login",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(solicitud, timeout=30) as respuesta:
+            cuerpo = respuesta.read()
+    except HTTPError as error:
+        try:
+            cuerpo_error = error.read()
+        except Exception:
+            cuerpo_error = b""
+        raise SesionStarviosInvalida(
+            f"No se pudo iniciar sesión con la cuenta de {etiqueta}: "
+            f"{detalle_error_login(cuerpo_error, error.code)}."
+        ) from error
+    except Exception as error:
+        raise RuntimeError(
+            f"No se pudo conectar con Supabase para la cuenta de {etiqueta} "
+            f"({type(error).__name__})."
+        ) from error
+
+    try:
+        datos = json.loads(cuerpo.decode("utf-8", "replace"))
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            f"Supabase devolvió una respuesta no válida para la cuenta de {etiqueta}."
+        ) from error
+    if not isinstance(datos, dict) or not datos.get("access_token"):
+        raise RuntimeError(
+            f"Supabase no devolvió una sesión válida para la cuenta de {etiqueta}."
+        )
+    print(f"🔑 Login correcto con la cuenta propia de {etiqueta}.")
+    return normalizar_sesion_starvios(json.dumps(datos), etiqueta)
+
+
+def validar_configuracion_actor(etiqueta: str, email: str, password: str, sesion: str) -> str | None:
+    """Require either a complete email/password pair or a stored session."""
+    if bool(email) != bool(password):
+        raise SesionStarviosInvalida(
+            f"Para {etiqueta}, configura el email y la contraseña juntos, o deja ambos "
+            "vacíos y usa su JSON de sesión como respaldo."
+        )
+    sesion_normalizada = None
+    if sesion:
+        try:
+            sesion_normalizada = normalizar_sesion_starvios(sesion, etiqueta)
+        except SesionStarviosInvalida:
+            if not (email and password):
+                raise
+            print(
+                f"⚠️ La sesión guardada de {etiqueta} no es válida; "
+                "se usará el login con email y contraseña."
+            )
+    if not (email and password) and not sesion_normalizada:
+        raise SesionStarviosInvalida(
+            f"Falta la cuenta de {etiqueta}. Configura sus secretos de email y contraseña, "
+            "o su JSON de sesión como respaldo."
+        )
+    return sesion_normalizada
+
+
+def requerir_configuracion() -> set[str]:
     if urlparse(URL).hostname not in HOSTS_PERMITIDOS:
         raise SystemExit("Host no autorizado.")
     if not GROQ_API_KEY:
@@ -81,14 +293,60 @@ def requerir_configuracion() -> None:
             "AUDIO_BRIDGE_URL debe ser la URL HTTPS temporal de trycloudflare.com "
             "y AUDIO_BRIDGE_TOKEN debe estar en GitHub Secrets."
         )
-    if not STARVIOS_SESSION_COOKIE:
-        raise SystemExit("Falta configurar STARVIOS_SESSION_COOKIE en GitHub Secrets.")
-    if not STARVIOS_SESSION_COOKIE_2:
-        raise SystemExit("Falta configurar STARVIOS_SESSION_COOKIE_2 para la sesión de Sebas.")
-    if STARVIOS_SESSION_COOKIE == STARVIOS_SESSION_COOKIE_2:
-        raise SystemExit("Las dos sesiones parecen iguales; cada cuenta debe tener su propia cookie.")
-    if PERSONALITY not in PERSONALITIES or PERSONALITY_SEBAS not in PERSONALITIES:
-        raise SystemExit("PERSONALITY y PERSONALITY_SEBAS deben elegir una personalidad disponible.")
+    modo_solo_mari = INTERACTION_MODE == "solo_mari"
+    modo_solo_sebas = INTERACTION_MODE == "solo_sebas"
+    actores_configurados = set()
+    sesion_mari = None
+    sesion_sebas = None
+    try:
+        if not modo_solo_sebas and (
+            STARVIOS_EMAIL_MARI or STARVIOS_PASSWORD_MARI or STARVIOS_SESSION_COOKIE
+        ):
+            sesion_mari = validar_configuracion_actor(
+                "Mari1565", STARVIOS_EMAIL_MARI, STARVIOS_PASSWORD_MARI, STARVIOS_SESSION_COOKIE
+            )
+            actores_configurados.add("mari")
+        if not modo_solo_mari and (
+            STARVIOS_EMAIL_SEBAS or STARVIOS_PASSWORD_SEBAS or STARVIOS_SESSION_COOKIE_2
+        ):
+            sesion_sebas = validar_configuracion_actor(
+                "sebasdark", STARVIOS_EMAIL_SEBAS, STARVIOS_PASSWORD_SEBAS, STARVIOS_SESSION_COOKIE_2
+            )
+            actores_configurados.add("sebas")
+    except SesionStarviosInvalida as error:
+        raise SystemExit(str(error)) from error
+    if modo_solo_mari:
+        if "mari" not in actores_configurados:
+            raise SystemExit("INTERACTION_MODE=solo_mari requiere configurar la cuenta de Mari.")
+        actores_configurados = {"mari"}
+    elif modo_solo_sebas:
+        if "sebas" not in actores_configurados:
+            raise SystemExit("INTERACTION_MODE=solo_sebas requiere configurar la cuenta de Sebas.")
+        actores_configurados = {"sebas"}
+    if not actores_configurados:
+        raise SystemExit(
+            "No hay ninguna cuenta configurada. Añade email/contraseña o una sesión para Mari, "
+            "para Sebas, o para ambos."
+        )
+    if "mari" in actores_configurados and "sebas" in actores_configurados:
+        if STARVIOS_EMAIL_MARI and (
+            STARVIOS_EMAIL_MARI.casefold() == STARVIOS_EMAIL_SEBAS.casefold()
+        ):
+            raise SystemExit(
+                "Mari y Sebas no pueden usar el mismo email; cada bot necesita su propia cuenta."
+            )
+        if sesion_mari and sesion_sebas:
+            usuario_mari = json.loads(sesion_mari).get("user", {}).get("id")
+            usuario_sebas = json.loads(sesion_sebas).get("user", {}).get("id")
+            if sesion_mari == sesion_sebas or usuario_mari == usuario_sebas:
+                raise SystemExit(
+                    "Las dos sesiones pertenecen a la misma cuenta; Mari y Sebas deben tener "
+                    "su propia cuenta de Starvios."
+                )
+    if "mari" in actores_configurados and PERSONALITY not in PERSONALITIES:
+        raise SystemExit("PERSONALITY debe elegir una personalidad disponible para Mari.")
+    if "sebas" in actores_configurados and PERSONALITY_SEBAS not in PERSONALITIES:
+        raise SystemExit("PERSONALITY_SEBAS debe elegir una personalidad disponible para Sebas.")
     if INTERACTION_MODE not in {
         "natural", "solo_mari", "solo_sebas", "named_viewer", "open_chat", "direct_chat", "silent"
     }:
@@ -105,6 +363,7 @@ def requerir_configuracion() -> None:
         raise SystemExit("Faltan selectores exactos del chat: " + ", ".join(faltantes))
     if LISTEN_MINUTES != "60":
         raise SystemExit("La duración de escucha está fijada a 60 minutos.")
+    return actores_configurados
 
 
 def normalizar_mensaje(texto: str) -> str:
@@ -335,16 +594,18 @@ def usuarios_mencionados(transcripcion: str, usuarios_chat: list[str]) -> list[s
 def decidir_interaccion(
     transcripcion: str, usuarios_mencionados_streamer: list[str], mensajes_nuevos: list[dict],
     modo: str, proactivo_listo: bool = False,
+    actores_disponibles: set[str] | None = None,
 ) -> tuple[bool, str, list[dict]]:
-    """Decide si alguno de los dos bots tiene un turno pertinente."""
+    """Decide si alguno de los bots configurados tiene un turno pertinente."""
+    disponibles = actores_disponibles or {"mari", "sebas"}
     llamada_por_voz = (
-        contiene_alias(transcripcion, BOT_ALIASES)
-        or contiene_alias(transcripcion, SEBAS_ALIASES)
+        ("mari" in disponibles and contiene_alias(transcripcion, BOT_ALIASES))
+        or ("sebas" in disponibles and contiene_alias(transcripcion, SEBAS_ALIASES))
     )
     mensajes_dirigidos = [
         f for f in mensajes_nuevos
-        if contiene_alias(f["texto"], BOT_ALIASES)
-        or contiene_alias(f["texto"], SEBAS_ALIASES)
+        if ("mari" in disponibles and contiene_alias(f["texto"], BOT_ALIASES))
+        or ("sebas" in disponibles and contiene_alias(f["texto"], SEBAS_ALIASES))
     ]
     usuarios_nuevos = {f["usuario"].casefold() for f in mensajes_nuevos}
     nombres_nuevos = [u for u in usuarios_mencionados_streamer if u in usuarios_nuevos]
@@ -353,11 +614,14 @@ def decidir_interaccion(
     if modo == "silent":
         return False, "Modo silencioso.", []
     if modo == "solo_mari":
-        llamada_a_mari = contiene_alias(transcripcion, BOT_ALIASES)
+        llamada_a_mari = "mari" in disponibles and contiene_alias(transcripcion, BOT_ALIASES)
         return llamada_a_mari, "llamada_directa_a_mari", mensajes_nuevos if llamada_a_mari else []
     if modo == "solo_sebas":
-        llamada_a_sebas = contiene_alias(transcripcion, SEBAS_ALIASES)
-        mensajes_a_sebas = [f for f in mensajes_nuevos if contiene_alias(f["texto"], SEBAS_ALIASES)]
+        llamada_a_sebas = "sebas" in disponibles and contiene_alias(transcripcion, SEBAS_ALIASES)
+        mensajes_a_sebas = [
+            f for f in mensajes_nuevos
+            if "sebas" in disponibles and contiene_alias(f["texto"], SEBAS_ALIASES)
+        ]
         return llamada_a_sebas or bool(mensajes_a_sebas), "llamada_directa_a_sebas", mensajes_a_sebas
     if modo == "direct_chat":
         return bool(mensajes_dirigidos), "mensaje_directo_de_chat", mensajes_dirigidos
@@ -592,33 +856,16 @@ async def publicar_y_verificar(
     print("✅ Mensaje confirmado en el chat.")
 
 
-async def seguir_canal_si_no_sigue(pagina, nombre: str) -> None:
-    """Sigue bryan_ solo si la página muestra inequívocamente el botón Seguir."""
-    siguiendo_aria = pagina.locator(
-        'button[aria-label="Siguiendo"], button[aria-label="Dejar de seguir"], '
-        'button[aria-label="Following"], button[aria-label="Unfollow"]'
-    )
-    siguiendo_texto = pagina.get_by_role(
-        "button", name=re.compile(r"^(siguiendo|dejar de seguir|following|unfollow)$", re.IGNORECASE)
-    )
-    if await siguiendo_aria.count() or await siguiendo_texto.count():
-        print(f"👣 {nombre} ya sigue este canal; no se cambia el seguimiento.")
-        return
-    seguir = pagina.locator('button[aria-label="Seguir"]')
-    if await seguir.count() != 1:
-        print("ℹ️ No se encontró un único botón Seguir; no se modificó el seguimiento.")
-        return
-    await seguir.click()
-    await pagina.wait_for_timeout(1_500)
-    if await siguiendo_aria.count() or await siguiendo_texto.count():
-        print(f"✅ {nombre} ahora sigue el canal.")
-    else:
-        print("⚠️ Se pulsó Seguir, pero la página no confirmó el nuevo estado.")
-
-
-def actor_mencionado(textos: list[str]) -> str | None:
-    """Devuelve el bot nombrado primero en voz/chat, para asignar un solo turno."""
+def actor_mencionado(
+    textos: list[str], actores_disponibles: set[str] | None = None
+) -> str | None:
+    """Devuelve el bot configurado nombrado primero en voz/chat."""
     aliases_por_actor = {"mari": BOT_ALIASES, "sebas": SEBAS_ALIASES}
+    if actores_disponibles is not None:
+        aliases_por_actor = {
+            clave: aliases for clave, aliases in aliases_por_actor.items()
+            if clave in actores_disponibles
+        }
     coincidencias = []
     for texto in textos:
         normalizado = normalizar_busqueda(texto)
@@ -631,32 +878,110 @@ def actor_mencionado(textos: list[str]) -> str | None:
     return min(coincidencias)[1] if coincidencias else None
 
 
-async def abrir_sesion_actor(navegador, actor: dict, dry_run: bool) -> None:
+async def inyectar_sesion_starvios(contexto, sesion_json: str) -> None:
+    """Write the Supabase session into localStorage before any page script runs."""
+    script = """
+    (() => {
+      try {
+        const host = location.hostname;
+        if (location.protocol === 'https:' &&
+            (host === 'starvios.com' || host.endsWith('.starvios.com'))) {
+          localStorage.setItem(%s, %s);
+        }
+      } catch (error) {
+        // about:blank and blocked origins do not expose localStorage.
+      }
+    })();
+    """ % (
+        json.dumps(STARVIOS_AUTH_STORAGE_KEY),
+        json.dumps(sesion_json),
+    )
+    await contexto.add_init_script(script=script)
+
+
+async def obtener_sesion_actor(actor: dict) -> str:
+    """Prefer a fresh password login; fall back to the stored session if needed."""
+    if actor["email"] and actor["password"]:
+        try:
+            return await asyncio.to_thread(
+                iniciar_sesion_starvios, actor["email"], actor["password"], actor["name"]
+            )
+        except Exception as error:
+            if not actor["session"]:
+                raise
+            detalle = (
+                str(error)[:180].rstrip(".")
+                if isinstance(error, SesionStarviosInvalida)
+                else type(error).__name__
+            )
+            print(
+                f"⚠️ Login con contraseña de {actor['name']} falló: {detalle}. "
+                "Se usará la sesión guardada como respaldo."
+            )
+    if actor["session"]:
+        return normalizar_sesion_starvios(actor["session"], actor["name"])
+    raise SesionStarviosInvalida(f"No hay credenciales configuradas para {actor['name']}.")
+
+
+async def abrir_sesion_actor(navegador, actor: dict, actores: dict) -> None:
+    sesion_json = await obtener_sesion_actor(actor)
+    datos_sesion = json.loads(sesion_json)
+    actor["user_id"] = datos_sesion["user"]["id"]
+    for otro in actores.values():
+        if otro is not actor and otro.get("user_id") == actor["user_id"]:
+            raise SesionStarviosInvalida(
+                f"{actor['name']} y {otro['name']} están usando la misma cuenta de Starvios. "
+                "Cada bot necesita una cuenta distinta."
+            )
     contexto = await navegador.new_context(
         viewport={"width": 1366, "height": 768}, locale="es-PE", timezone_id="America/Lima"
     )
     actor["context"] = contexto
-    await contexto.add_cookies([{
-        "name": "session", "value": actor["cookie"],
-        "domain": ".starvios.com", "path": "/", "secure": True, "httpOnly": True,
-    }])
+    await inyectar_sesion_starvios(contexto, sesion_json)
     pagina = await contexto.new_page()
     actor["page"] = pagina
-    print(f"🔐 Iniciando sesión de {actor['name']} en Starvios.")
+    print(f"🔐 Iniciando sesión de {actor['name']} en Starvios mediante localStorage.")
+    try:
+        expira = float(json.loads(sesion_json).get("expires_at") or 0)
+    except (TypeError, ValueError):
+        expira = 0
+    if expira and expira <= time.time() + 300:
+        print(
+            f"⚠️ La sesión de {actor['name']} está caducada o caduca pronto; "
+            "Supabase intentará renovarla con el refresh_token."
+        )
     await pagina.goto(URL, wait_until="domcontentloaded", timeout=30_000)
     await pagina.wait_for_timeout(8_000)
     entrada = pagina.locator(CHAT_INPUT_SELECTOR)
     try:
         await entrada.wait_for(state="visible", timeout=10_000)
     except PlaywrightError as error:
+        try:
+            sesion_presente = await pagina.evaluate(
+                "clave => Boolean(localStorage.getItem(clave))", STARVIOS_AUTH_STORAGE_KEY
+            )
+        except PlaywrightError:
+            sesion_presente = False
+        try:
+            aviso_login = await pagina.get_by_text(
+                re.compile(
+                    r"log in to chat|inicia sesión|entrar para chatear|inicia sesión para chatear",
+                    re.IGNORECASE,
+                )
+            ).count() > 0
+        except PlaywrightError:
+            aviso_login = False
         raise RuntimeError(
-            f"No se ve el campo de chat con la sesión de {actor['name']}; "
-            "revisa que su cookie corresponda a la cuenta correcta y siga vigente."
+            f"No se ve el campo de chat con la sesión de {actor['name']}. "
+            f"localStorage {'contiene' if sesion_presente else 'no contiene'} la clave "
+            f"'{STARVIOS_AUTH_STORAGE_KEY}'; la página "
+            f"{'muestra' if aviso_login else 'no muestra'} el aviso de login. "
+            "Starvios no usa la cookie 'session': usa el JSON de sesión de Supabase en "
+            "localStorage. Revisa que el secreto corresponda a esta cuenta y que la sesión "
+            "siga vigente; si caducó, vuelve a iniciar sesión y exporta un JSON nuevo."
         ) from error
-    if FOLLOW_STREAMER and not dry_run and AUDIO_SOURCE_VALIDATED:
-        await seguir_canal_si_no_sigue(pagina, actor["name"])
-    elif FOLLOW_STREAMER and dry_run:
-        print(f"🧪 DRY_RUN: {actor['name']} no cambiará el seguimiento.")
+    # No se automatiza el seguimiento: los términos de Starvios prohíben inflar
+    # seguidores con bots o cuentas falsas.
     actor["started"] = time.monotonic()
     actor["started_at_epoch"] = time.time()
     actor["first_cooldown_seconds"] = random.randint(*rango_pausa_actor(actor["id"]))
@@ -670,36 +995,40 @@ async def abrir_sesion_actor(navegador, actor: dict, dry_run: bool) -> None:
 
 
 async def ciclo_bot() -> None:
-    requerir_configuracion()
+    actores_configurados = requerir_configuracion()
     resumen = {
         "dry_run": DRY_RUN, "estado_stream": "en observación",
         "contadores": {}, "eventos": [],
     }
-    delay_mari = random.randint(2, 5)
+    delay_primer = random.randint(2, 5)
     duracion_mari = random.randint(50, 65)
-    delay_sebas = random.randint(19, 25)
     duracion_sebas = random.randint(50, 65)
-    actores = {
-        "mari": {
+    delay_sebas = random.randint(19, 25)
+
+    actores = {}
+    if "mari" in actores_configurados:
+        actores["mari"] = {
             "id": "mari",
             "name": BOT_NAME, "aliases": BOT_ALIASES,
-            "cookie": STARVIOS_SESSION_COOKIE,
+            "email": STARVIOS_EMAIL_MARI, "password": STARVIOS_PASSWORD_MARI,
+            "session": STARVIOS_SESSION_COOKIE,
             "label": "[Mari1565 · bot]", "personality": PERSONALITY,
             "custom_personality": CUSTOM_PERSONALITY,
-            "join_after": delay_mari * 60, "duration_minutes": duracion_mari,
+            "join_after": delay_primer * 60, "duration_minutes": duracion_mari,
             "context": None, "page": None, "active": False,
-        },
-        "sebas": {
+        }
+    if "sebas" in actores_configurados:
+        actores["sebas"] = {
             "id": "sebas",
             "name": SEBAS_NAME, "aliases": SEBAS_ALIASES,
-            "cookie": STARVIOS_SESSION_COOKIE_2,
+            "email": STARVIOS_EMAIL_SEBAS, "password": STARVIOS_PASSWORD_SEBAS,
+            "session": STARVIOS_SESSION_COOKIE_2,
             "label": "[sebasdark · bot]", "personality": PERSONALITY_SEBAS,
             "custom_personality": CUSTOM_PERSONALITY_SEBAS,
-            "join_after": None,
+            "join_after": None if "mari" in actores else delay_primer * 60,
             "duration_minutes": duracion_sebas,
             "context": None, "page": None, "active": False,
-        },
-    }
+        }
     async with async_playwright() as playwright:
         navegador = await playwright.chromium.launch(headless=True)
         observador = await navegador.new_context(
@@ -717,11 +1046,11 @@ async def ciclo_bot() -> None:
             memoria_chat = deque()
             stream_sin_senal_desde = None
             audio_capture_warning_logged = False
-            # En una prueba se abren ambas sesiones de inmediato para validar ambos secretos;
+            # En una prueba se abren de inmediato las sesiones configuradas;
             # no se publica y la ejecución termina tras generar un borrador.
             if DRY_RUN:
-                await abrir_sesion_actor(navegador, actores["mari"], dry_run=True)
-                await abrir_sesion_actor(navegador, actores["sebas"], dry_run=True)
+                for actor in actores.values():
+                    await abrir_sesion_actor(navegador, actor, actores)
             inicio_programa = time.monotonic()
             _, _, chat_inicial = await obtener_contexto_stream(pagina, "")
             chats_vistos = {
@@ -730,19 +1059,39 @@ async def ciclo_bot() -> None:
                 ).hexdigest()
                 for f in chat_inicial
             }
-            fin = (
-                inicio_programa + 5 * 60 if DRY_RUN
-                else inicio_programa + (delay_mari + delay_sebas + duracion_sebas + 2) * 60
-            )
+            if DRY_RUN:
+                fin = inicio_programa + 5 * 60
+            elif "mari" in actores and "sebas" in actores:
+                fin = inicio_programa + (delay_primer + delay_sebas + duracion_sebas + 2) * 60
+            elif "mari" in actores:
+                fin = inicio_programa + (delay_primer + duracion_mari + 2) * 60
+            else:
+                fin = inicio_programa + (delay_primer + duracion_sebas + 2) * 60
             actor_cursor = 0
-            print(
-                f"⏱️ Horarios elegidos para esta ejecución: Mari entra en {delay_mari} min y "
-                f"permanece {duracion_mari}; Sebas entra {delay_sebas} min después de Mari "
-                f"y permanece {duracion_sebas}. No son minutos fijos."
-            )
+            if "mari" in actores and "sebas" in actores:
+                print(
+                    f"⏱️ Horarios elegidos para esta ejecución: Mari entra en {delay_primer} min "
+                    f"y permanece {duracion_mari}; Sebas entra {delay_sebas} min después de Mari "
+                    f"y permanece {duracion_sebas}. No son minutos fijos."
+                )
+            elif "mari" in actores:
+                print(
+                    f"⏱️ Horario elegido: Mari entra en {delay_primer} min y permanece "
+                    f"{duracion_mari}. No son minutos fijos."
+                )
+            else:
+                print(
+                    f"⏱️ Horario elegido: Sebas entra en {delay_primer} min y permanece "
+                    f"{duracion_sebas}. No son minutos fijos."
+                )
+            pausas = []
+            if "mari" in actores:
+                pausas.append("Mari=8–12 min")
+            if "sebas" in actores:
+                pausas.append("Sebas=13–17 min")
             print(
                 f"🎧 Observación compartida del stream; modo={INTERACTION_MODE}, "
-                f"pausa Mari=8–12 min, Sebas=13–17 min; máximo compartido="
+                f"pausa {'; '.join(pausas)}; máximo compartido="
                 f"{MAX_MESSAGES_PER_WINDOW}/6 h."
             )
 
@@ -766,8 +1115,8 @@ async def ciclo_bot() -> None:
                         not actor["active"] and actor["join_after"] is not None
                         and ahora_mono >= inicio_programa + actor["join_after"]
                     ):
-                        await abrir_sesion_actor(navegador, actor, dry_run=False)
-                        if actor_id == "mari":
+                        await abrir_sesion_actor(navegador, actor, actores)
+                        if actor_id == "mari" and "sebas" in actores:
                             actores["sebas"]["join_after"] = (
                                 actor["started"] - inicio_programa + delay_sebas * 60
                             )
@@ -819,15 +1168,17 @@ async def ciclo_bot() -> None:
                 tomar_turno, motivo, pertinentes = decidir_interaccion(
                     transcripcion_reciente, mencionados, mensajes_nuevos, INTERACTION_MODE,
                     proactivo_listo=proactivo_listo,
+                    actores_disponibles=set(actores),
                 )
                 if not tomar_turno:
                     activos = [a["name"] for a in actores.values() if a["active"]]
                     print(f"⏭️ Sin turno para los bots activos {activos}: {motivo}")
                     continue
 
-                actor_solicitado = actor_mencionado([transcripcion_reciente] + [
-                    fila["texto"] for fila in pertinentes
-                ])
+                actor_solicitado = actor_mencionado(
+                    [transcripcion_reciente] + [fila["texto"] for fila in pertinentes],
+                    actores_disponibles=set(actores),
+                )
                 activos = [key for key, actor in actores.items() if actor["active"]]
                 if motivo == "comentario_contextual_del_stream":
                     elegibles = listos_proactivo
@@ -959,4 +1310,3 @@ async def ciclo_bot() -> None:
 
 if __name__ == "__main__":
     asyncio.run(ciclo_bot())
-
