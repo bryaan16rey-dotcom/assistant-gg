@@ -1,15 +1,17 @@
-"""Stream only the selected OBS monitor input to the private Cloudflare relay."""
+"""Serve OBS microphone chunks locally for a temporary Cloudflare Quick Tunnel."""
 
 import argparse
 import getpass
-import io
+import hmac
 import os
 import queue
 import sys
+import threading
 import time
 import wave
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from collections import deque
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 import sounddevice as sd
 
@@ -17,7 +19,10 @@ SAMPLE_RATE = 48_000
 CHANNELS = 1
 SAMPLE_WIDTH = 2
 CHUNK_SECONDS = 5
+MAX_PENDING_CHUNKS = 24
 DEFAULT_DEVICE_NAME = "CABLE Output"
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8765
 
 
 def find_input_device(query: str):
@@ -42,6 +47,8 @@ def find_input_device(query: str):
 
 
 def make_wav(raw_audio: bytes) -> bytes:
+    import io
+
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as wav_file:
         wav_file.setnchannels(CHANNELS)
@@ -51,24 +58,102 @@ def make_wav(raw_audio: bytes) -> bytes:
     return buffer.getvalue()
 
 
-def send_chunk(url: str, token: str, wav_audio: bytes) -> None:
-    request = Request(
-        f"{url.rstrip('/')}/v1/audio",
-        data=wav_audio,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "audio/wav",
-        },
-        method="POST",
-    )
-    try:
-        with urlopen(request, timeout=20) as response:
-            if response.status != 201:
-                raise RuntimeError(f"El puente respondió HTTP {response.status}.")
-    except HTTPError as error:
-        raise RuntimeError(f"El puente respondió HTTP {error.code}.") from error
-    except URLError as error:
-        raise RuntimeError("No se pudo conectar con Cloudflare.") from error
+class AudioQueue:
+    """Small in-memory FIFO; old audio is dropped rather than written to disk."""
+
+    def __init__(self):
+        self._items = deque()
+        self._lock = threading.Lock()
+        self._next_id = 0
+
+    def add(self, wav_audio: bytes) -> bool:
+        dropped = False
+        with self._lock:
+            if len(self._items) >= MAX_PENDING_CHUNKS:
+                self._items.popleft()
+                dropped = True
+            item_id = str(self._next_id)
+            self._next_id += 1
+            self._items.append((item_id, wav_audio))
+        return dropped
+
+    def peek(self):
+        with self._lock:
+            return self._items[0] if self._items else None
+
+    def acknowledge(self, item_id: str) -> bool:
+        with self._lock:
+            if self._items and hmac.compare_digest(self._items[0][0], item_id):
+                self._items.popleft()
+                return True
+            return False
+
+
+def make_handler(audio_queue: AudioQueue, token: str):
+    class BridgeHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, _format, *_args):
+            # Do not log paths, query parameters, audio text, or auth headers.
+            return
+
+        def _authorized(self) -> bool:
+            received = self.headers.get("Authorization", "")
+            return hmac.compare_digest(received, f"Bearer {token}")
+
+        def _reply(self, status: int, body: bytes = b"", content_type: str = "application/json", headers=None):
+            self.send_response(status)
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            self.send_header("Content-Length", str(len(body)))
+            if body:
+                self.send_header("Content-Type", content_type)
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
+            self.end_headers()
+            if body:
+                self.wfile.write(body)
+
+        def do_GET(self):
+            if not self._authorized():
+                self._reply(401, b'{"error":"unauthorized"}')
+                return
+            path = urlsplit(self.path).path
+            if path == "/health":
+                self._reply(200, b'{"ok":true}')
+                return
+            if path != "/v1/audio/next":
+                self._reply(404, b'{"error":"not found"}')
+                return
+            item = audio_queue.peek()
+            if item is None:
+                self._reply(204)
+                return
+            item_id, wav_audio = item
+            self._reply(200, wav_audio, "audio/wav", {"X-Audio-Id": item_id})
+
+        def do_DELETE(self):
+            if not self._authorized():
+                self._reply(401, b'{"error":"unauthorized"}')
+                return
+            parsed = urlsplit(self.path)
+            if parsed.path != "/v1/audio/ack":
+                self._reply(404, b'{"error":"not found"}')
+                return
+            item_id = parse_qs(parsed.query).get("id", [""])[0]
+            if audio_queue.acknowledge(item_id):
+                self._reply(204)
+            else:
+                self._reply(404, b'{"error":"audio item not found"}')
+
+    return BridgeHandler
+
+
+def start_http_server(audio_queue: AudioQueue, token: str, host: str, port: int):
+    server = ThreadingHTTPServer((host, port), make_handler(audio_queue, token))
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, name="audio-http-bridge", daemon=True)
+    thread.start()
+    return server
 
 
 def main() -> int:
@@ -82,13 +167,21 @@ def main() -> int:
                 print(f"{index}: {device['name']} ({device['max_input_channels']} canal(es) de entrada)")
         return 0
 
-    url = os.environ.get("AUDIO_BRIDGE_URL", "").strip().rstrip("/")
     token = os.environ.get("AUDIO_BRIDGE_TOKEN", "").strip()
     if not token:
         token = getpass.getpass("Token privado del puente (no se mostrará): ").strip()
     device_query = os.environ.get("AUDIO_INPUT_DEVICE", DEFAULT_DEVICE_NAME).strip()
-    if not url.startswith("https://") or not token:
-        print("Configura AUDIO_BRIDGE_URL y AUDIO_BRIDGE_TOKEN en esta terminal.", file=sys.stderr)
+    host = os.environ.get("AUDIO_BRIDGE_HOST", DEFAULT_HOST).strip()
+    try:
+        port = int(os.environ.get("AUDIO_BRIDGE_PORT", str(DEFAULT_PORT)))
+    except ValueError:
+        print("AUDIO_BRIDGE_PORT debe ser un número.", file=sys.stderr)
+        return 2
+    if host != DEFAULT_HOST or not (1 <= port <= 65535) or len(token) < 32:
+        print(
+            "El puente requiere host 127.0.0.1, un puerto válido y un token aleatorio de al menos 32 caracteres.",
+            file=sys.stderr,
+        )
         return 2
 
     try:
@@ -102,6 +195,7 @@ def main() -> int:
 
     blocks = queue.Queue(maxsize=32)
     chunk_bytes = SAMPLE_RATE * SAMPLE_WIDTH * CHUNK_SECONDS
+    audio_queue = AudioQueue()
 
     def capture_callback(indata, _frames, _time_info, status):
         if status:
@@ -109,12 +203,27 @@ def main() -> int:
         try:
             blocks.put_nowait(bytes(indata))
         except queue.Full:
-            pass
+            try:
+                blocks.get_nowait()
+                blocks.put_nowait(bytes(indata))
+            except queue.Empty:
+                pass
 
-    print(f"🎙️ Enviando solo la entrada `{device['name']}` a Cloudflare, en fragmentos de {CHUNK_SECONDS}s.")
-    print("No se guarda audio en disco. Presiona Ctrl+C para detener el puente.")
+    try:
+        server = start_http_server(audio_queue, token, host, port)
+    except OSError as error:
+        print(f"No se pudo abrir el puente local en {host}:{port}: {error}", file=sys.stderr)
+        return 2
+
+    print(f"🎙️ Capturando solo `{device['name']}` en fragmentos de {CHUNK_SECONDS}s.")
+    print(f"Puente privado local activo en http://{host}:{port}; no se guardan archivos de audio.")
+    print("En otra terminal abre: cloudflared tunnel --url http://127.0.0.1:" + str(port))
+    print("Pega la URL https://*.trycloudflare.com como entrada del workflow manual.")
+    print("Deja ambas terminales abiertas durante la prueba; Ctrl+C detiene este puente.")
+
     pending = bytearray()
-    sent_count = 0
+    chunk_count = 0
+    dropped_count = 0
     try:
         with sd.RawInputStream(
             device=device_index,
@@ -125,20 +234,31 @@ def main() -> int:
             callback=capture_callback,
         ):
             while True:
-                pending.extend(blocks.get())
+                try:
+                    pending.extend(blocks.get(timeout=0.5))
+                except queue.Empty:
+                    continue
                 if len(pending) >= chunk_bytes:
                     segment = bytes(pending[:chunk_bytes])
                     del pending[:chunk_bytes]
-                    send_chunk(url, token, make_wav(segment))
-                    sent_count += 1
-                    print(f"✅ Fragmento {sent_count} enviado ({time.strftime('%H:%M:%S')}).")
+                    if audio_queue.add(make_wav(segment)):
+                        dropped_count += 1
+                        if dropped_count == 1 or dropped_count % 12 == 0:
+                            print("⚠️ El consumidor está atrasado; se descartó audio antiguo por privacidad y latencia.")
+                    chunk_count += 1
+                    if chunk_count == 1 or chunk_count % 12 == 0:
+                        print(f"✅ Audio de micrófono en cola ({chunk_count} fragmentos capturados).")
     except KeyboardInterrupt:
         print("\nPuente detenido por el usuario.")
         return 0
     except Exception as error:
-        print(f"El puente se detuvo: {error}", file=sys.stderr)
+        print(f"El puente se detuvo: {type(error).__name__}.", file=sys.stderr)
         return 1
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
