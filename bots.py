@@ -923,8 +923,129 @@ async def obtener_sesion_actor(actor: dict) -> str:
     raise SesionStarviosInvalida(f"No hay credenciales configuradas para {actor['name']}.")
 
 
+async def leer_sesion_starvios(pagina, etiqueta: str) -> str | None:
+    """Read the session that the Starvios login form stored in localStorage."""
+    try:
+        valor = await pagina.evaluate(
+            "clave => localStorage.getItem(clave)", STARVIOS_AUTH_STORAGE_KEY
+        )
+    except PlaywrightError:
+        return None
+    if not valor:
+        return None
+    try:
+        return normalizar_sesion_starvios(valor, etiqueta)
+    except SesionStarviosInvalida:
+        return None
+
+
+async def iniciar_sesion_en_formulario(pagina, actor: dict) -> str | None:
+    """Log in through Starvios' own form so its Supabase client creates the session."""
+    print(f"🔐 Iniciando sesión de {actor['name']} en el formulario de Starvios.")
+    try:
+        await pagina.goto("https://starvios.com/auth", wait_until="domcontentloaded", timeout=30_000)
+        email = pagina.locator("#email")
+        password = pagina.locator("#password")
+        await email.wait_for(state="visible", timeout=15_000)
+        await password.wait_for(state="visible", timeout=5_000)
+        await email.fill(actor["email"])
+        await password.fill(actor["password"])
+        boton = pagina.locator("form button[type='submit']").first
+        if await boton.count() == 0:
+            boton = pagina.get_by_role("button", name="Entrar", exact=True)
+        await boton.click()
+        try:
+            await pagina.wait_for_url(lambda url: "/auth" not in url, timeout=20_000)
+        except PlaywrightError:
+            # Some sessions stay on /auth but are still stored correctly.
+            pass
+        await pagina.wait_for_timeout(1500)
+        sesion_json = await leer_sesion_starvios(pagina, actor["name"])
+        if sesion_json:
+            print(f"✅ Formulario de {actor['name']} autenticado correctamente.")
+        return sesion_json
+    except Exception as error:
+        print(
+            f"⚠️ El formulario de login de {actor['name']} no completó la sesión "
+            f"({type(error).__name__}); se intentará el acceso por API o la sesión guardada."
+        )
+        return None
+
+
+async def diagnosticar_sesion_starvios(pagina, etiqueta: str) -> None:
+    """Print safe auth diagnostics without exposing tokens or passwords."""
+    try:
+        datos = await pagina.evaluate(
+            """clave => {
+                const valor = localStorage.getItem(clave);
+                if (!valor) return {tieneClave: false};
+                try {
+                    const sesion = JSON.parse(valor);
+                    return {
+                        tieneClave: true,
+                        json: true,
+                        expires_at: sesion.expires_at ?? null,
+                        ahora: Math.floor(Date.now() / 1000),
+                        user_id: Boolean(sesion.user && sesion.user.id),
+                        access_token_len: (sesion.access_token || '').length,
+                    };
+                } catch (error) {
+                    return {tieneClave: true, json: false};
+                }
+            }""",
+            STARVIOS_AUTH_STORAGE_KEY,
+        )
+        print(f"DIAG sesión {etiqueta}: {datos}")
+        if datos.get("tieneClave") and datos.get("json"):
+            comprobacion = await pagina.evaluate(
+                """async ({clave, url, apikey}) => {
+                    const sesion = JSON.parse(localStorage.getItem(clave));
+                    try {
+                        const respuesta = await fetch(url + '/auth/v1/user', {
+                            headers: {apikey: apikey, Authorization: 'Bearer ' + sesion.access_token},
+                        });
+                        return {status: respuesta.status};
+                    } catch (error) {
+                        return {status: 'error_red'};
+                    }
+                }""",
+                {
+                    "clave": STARVIOS_AUTH_STORAGE_KEY,
+                    "url": STARVIOS_SUPABASE_URL,
+                    "apikey": STARVIOS_SUPABASE_KEY,
+                },
+            )
+            print(f"DIAG /auth/v1/user {etiqueta}: {comprobacion}")
+    except Exception as error:
+        print(f"DIAG sesión {etiqueta}: no se pudo evaluar ({type(error).__name__}).")
+
+
 async def abrir_sesion_actor(navegador, actor: dict, actores: dict) -> None:
-    sesion_json = await obtener_sesion_actor(actor)
+    contexto = await navegador.new_context(
+        viewport={"width": 1366, "height": 768}, locale="es-PE", timezone_id="America/Lima"
+    )
+    actor["context"] = contexto
+    pagina = await contexto.new_page()
+    actor["page"] = pagina
+
+    sesion_json = None
+    if actor["email"] and actor["password"]:
+        sesion_json = await iniciar_sesion_en_formulario(pagina, actor)
+
+    if not sesion_json:
+        if actor["email"] and actor["password"]:
+            # Clear any partial state left by the form before injecting the fallback.
+            try:
+                await pagina.goto("https://starvios.com/", wait_until="domcontentloaded", timeout=30_000)
+                await pagina.evaluate(
+                    "clave => localStorage.removeItem(clave)", STARVIOS_AUTH_STORAGE_KEY
+                )
+            except PlaywrightError:
+                pass
+        sesion_json = await obtener_sesion_actor(actor)
+        await inyectar_sesion_starvios(contexto, sesion_json)
+        print(f"🔐 Iniciando sesión de {actor['name']} en Starvios mediante localStorage.")
+
     datos_sesion = json.loads(sesion_json)
     actor["user_id"] = datos_sesion["user"]["id"]
     for otro in actores.values():
@@ -933,14 +1054,7 @@ async def abrir_sesion_actor(navegador, actor: dict, actores: dict) -> None:
                 f"{actor['name']} y {otro['name']} están usando la misma cuenta de Starvios. "
                 "Cada bot necesita una cuenta distinta."
             )
-    contexto = await navegador.new_context(
-        viewport={"width": 1366, "height": 768}, locale="es-PE", timezone_id="America/Lima"
-    )
-    actor["context"] = contexto
-    await inyectar_sesion_starvios(contexto, sesion_json)
-    pagina = await contexto.new_page()
-    actor["page"] = pagina
-    print(f"🔐 Iniciando sesión de {actor['name']} en Starvios mediante localStorage.")
+    print(f"🔐 Sesión de {actor['name']} establecida en Starvios.")
     try:
         expira = float(json.loads(sesion_json).get("expires_at") or 0)
     except (TypeError, ValueError):
@@ -965,20 +1079,20 @@ async def abrir_sesion_actor(navegador, actor: dict, actores: dict) -> None:
         try:
             aviso_login = await pagina.get_by_text(
                 re.compile(
-                    r"log in to chat|inicia sesión|entrar para chatear|inicia sesión para chatear",
+                    r"log in|login|sign in|inicia sesión|entrar para chatear",
                     re.IGNORECASE,
                 )
             ).count() > 0
         except PlaywrightError:
             aviso_login = False
+        await diagnosticar_sesion_starvios(pagina, actor["name"])
         raise RuntimeError(
             f"No se ve el campo de chat con la sesión de {actor['name']}. "
             f"localStorage {'contiene' if sesion_presente else 'no contiene'} la clave "
             f"'{STARVIOS_AUTH_STORAGE_KEY}'; la página "
             f"{'muestra' if aviso_login else 'no muestra'} el aviso de login. "
-            "Starvios no usa la cookie 'session': usa el JSON de sesión de Supabase en "
-            "localStorage. Revisa que el secreto corresponda a esta cuenta y que la sesión "
-            "siga vigente; si caducó, vuelve a iniciar sesión y exporta un JSON nuevo."
+            "Revisa las credenciales del formulario, el JSON de sesión o la verificación "
+            "en dos pasos de la cuenta."
         ) from error
     # No se automatiza el seguimiento: los términos de Starvios prohíben inflar
     # seguidores con bots o cuentas falsas.

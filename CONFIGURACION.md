@@ -153,11 +153,13 @@ secretos del bot que no uses. El modo `natural` usa todas las cuentas
 configuradas; `solo_mari` y `solo_sebas` exigen esa cuenta e ignoran por
 completo la otra, aunque quede una sesión vieja guardada.
 
-El login se hace contra Supabase, igual que el formulario de Starvios. La cuenta
-debe tener el correo confirmado. Si tiene verificación en dos pasos, el login
-automático puede rechazarse; en ese caso usa el JSON de sesión como respaldo.
-En `dry_run`, el bot abre las sesiones configuradas al inicio, así puedes
-comprobar cada cuenta antes de publicar.
+El bot inicia sesión con el formulario propio de Starvios usando el email y la
+contraseña de la cuenta. Si el formulario no completa la sesión, intenta la API
+de Supabase y, por último, el JSON de sesión guardado. La cuenta debe tener el
+correo confirmado. Si tiene verificación en dos pasos, el login automático puede
+rechazarse; en ese caso usa el JSON de sesión como respaldo. En `dry_run`, el bot
+abre las sesiones configuradas al inicio, así puedes comprobar cada cuenta antes
+de publicar.
 
 Usa cuentas dedicadas a los bots, con contraseñas únicas y sin datos de pago ni
 personales. Los secretos de GitHub están cifrados, pero cualquier workflow con
