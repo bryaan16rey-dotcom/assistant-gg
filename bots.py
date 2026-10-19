@@ -923,6 +923,58 @@ async def obtener_sesion_actor(actor: dict) -> str:
     raise SesionStarviosInvalida(f"No hay credenciales configuradas para {actor['name']}.")
 
 
+def redactar_diagnostico(texto: str, limite: int = 300) -> str:
+    """Keep diagnostic logs useful without exposing tokens."""
+    limpio = re.sub(r"eyJ[a-zA-Z0-9_-]{10,}", "<jwt>", str(texto))
+    limpio = re.sub(r"sb_publishable_[A-Za-z0-9_-]+", "<clave-publica>", limpio)
+    return limpio[:limite]
+
+
+SCRIPT_DIAGNOSTICO_STARVIOS = """
+(() => {
+  try {
+    const marca = 'DIAG_APP ';
+    const origGet = Storage.prototype.getItem;
+    Storage.prototype.getItem = function(clave) {
+      const valor = origGet.call(this, clave);
+      if (typeof clave === 'string' && clave.includes('auth-token')) {
+        console.log(marca + 'GET ' + clave + ' -> ' + (valor ? valor.length : 'null'));
+      }
+      return valor;
+    };
+    const origSet = Storage.prototype.setItem;
+    Storage.prototype.setItem = function(clave, valor) {
+      if (typeof clave === 'string' && clave.includes('auth-token')) {
+        console.log(marca + 'SET ' + clave + ' -> ' + String(valor).length);
+      }
+      return origSet.call(this, clave, valor);
+    };
+    const origRemove = Storage.prototype.removeItem;
+    Storage.prototype.removeItem = function(clave) {
+      if (typeof clave === 'string' && clave.includes('auth-token')) {
+        console.log(marca + 'REMOVE ' + clave);
+      }
+      return origRemove.call(this, clave);
+    };
+    const origFetch = window.fetch;
+    window.fetch = async function(...args) {
+      const entrada = args[0];
+      const url = typeof entrada === 'string' ? entrada : (entrada && entrada.url) || '';
+      if (url.includes('/auth/v1/')) {
+        console.log(marca + 'FETCH ' + ((args[1] && args[1].method) || (entrada && entrada.method) || 'GET') + ' ' + url.split('?')[0]);
+        const respuesta = await origFetch.apply(this, args);
+        console.log(marca + 'FETCH_RES ' + respuesta.status + ' ' + url.split('?')[0]);
+        return respuesta;
+      }
+      return origFetch.apply(this, args);
+    };
+  } catch (error) {
+    console.log('DIAG_APP INIT_ERROR ' + String(error));
+  }
+})();
+"""
+
+
 async def leer_sesion_starvios(pagina, etiqueta: str) -> str | None:
     """Read the session that the Starvios login form stored in localStorage."""
     try:
@@ -953,9 +1005,29 @@ async def iniciar_sesion_en_formulario(pagina, actor: dict) -> str | None:
         boton = pagina.locator("form button[type='submit']").first
         if await boton.count() == 0:
             boton = pagina.get_by_role("button", name="Entrar", exact=True)
-        await boton.click()
+        respuesta_token = None
         try:
-            await pagina.wait_for_url(lambda url: "/auth" not in url, timeout=20_000)
+            async with pagina.expect_response(
+                lambda respuesta: "/auth/v1/token" in respuesta.url, timeout=20_000
+            ) as espera:
+                await boton.click()
+            respuesta_token = await espera.value
+        except PlaywrightError:
+            print("DIAG formulario: no hubo respuesta de /auth/v1/token.")
+        if respuesta_token is not None:
+            print(f"DIAG formulario token: HTTP {respuesta_token.status}.")
+            if respuesta_token.status != 200:
+                try:
+                    datos_error = json.loads(await respuesta_token.text())
+                    detalle = " ".join(
+                        str(datos_error.get(clave) or "")
+                        for clave in ("error_description", "error", "msg", "message", "error_code")
+                    ).strip()
+                    print(f"DIAG formulario error: {redactar_diagnostico(detalle, 200)}")
+                except Exception:
+                    print("DIAG formulario error: respuesta no JSON.")
+        try:
+            await pagina.wait_for_url(lambda url: "/auth" not in url, timeout=10_000)
         except PlaywrightError:
             # Some sessions stay on /auth but are still stored correctly.
             pass
@@ -963,6 +1035,8 @@ async def iniciar_sesion_en_formulario(pagina, actor: dict) -> str | None:
         sesion_json = await leer_sesion_starvios(pagina, actor["name"])
         if sesion_json:
             print(f"✅ Formulario de {actor['name']} autenticado correctamente.")
+        else:
+            print(f"DIAG formulario: sin sesión en localStorage (URL: {pagina.url}).")
         return sesion_json
     except Exception as error:
         print(
@@ -984,10 +1058,16 @@ async def diagnosticar_sesion_starvios(pagina, etiqueta: str) -> None:
                     return {
                         tieneClave: true,
                         json: true,
+                        claves: Object.keys(sesion),
+                        claves_usuario: Object.keys(sesion.user || {}),
                         expires_at: sesion.expires_at ?? null,
+                        expires_at_tipo: typeof sesion.expires_at,
                         ahora: Math.floor(Date.now() / 1000),
                         user_id: Boolean(sesion.user && sesion.user.id),
                         access_token_len: (sesion.access_token || '').length,
+                        access_token_partes: String(sesion.access_token || '').split('.').length,
+                        refresh_token_len: (sesion.refresh_token || '').length,
+                        token_type: sesion.token_type ?? null,
                     };
                 } catch (error) {
                     return {tieneClave: true, json: false};
@@ -1027,6 +1107,25 @@ async def abrir_sesion_actor(navegador, actor: dict, actores: dict) -> None:
     actor["context"] = contexto
     pagina = await contexto.new_page()
     actor["page"] = pagina
+
+    diagnostico_consola: list[str] = []
+
+    def anotar_diagnostico(texto: str) -> None:
+        diagnostico_consola.append(redactar_diagnostico(texto))
+        if len(diagnostico_consola) > 120:
+            diagnostico_consola.pop(0)
+
+    def manejar_consola(mensaje) -> None:
+        if "DIAG_APP" in mensaje.text or mensaje.type in {"error", "warning"}:
+            anotar_diagnostico(f"console {mensaje.type}: {mensaje.text}")
+
+    pagina.on("console", manejar_consola)
+    pagina.on("pageerror", lambda error: anotar_diagnostico(f"pageerror: {error}"))
+    pagina.on(
+        "requestfailed",
+        lambda peticion: anotar_diagnostico(f"requestfailed: {peticion.url.split('?')[0]}"),
+    )
+    await contexto.add_init_script(script=SCRIPT_DIAGNOSTICO_STARVIOS)
 
     sesion_json = None
     if actor["email"] and actor["password"]:
@@ -1086,6 +1185,10 @@ async def abrir_sesion_actor(navegador, actor: dict, actores: dict) -> None:
         except PlaywrightError:
             aviso_login = False
         await diagnosticar_sesion_starvios(pagina, actor["name"])
+        if diagnostico_consola:
+            print("--- Diagnóstico del navegador ---")
+            for linea in diagnostico_consola[-40:]:
+                print(linea)
         raise RuntimeError(
             f"No se ve el campo de chat con la sesión de {actor['name']}. "
             f"localStorage {'contiene' if sesion_presente else 'no contiene'} la clave "
