@@ -14,7 +14,7 @@ if not GROQ_API_KEY:
 
 client = Groq(api_key=GROQ_API_KEY)
 
-URL = "https://starvios.com/live/goyomon"
+URL = "https://starvios.com/live/bryan_"
 HOSTS_PERMITIDOS = {"starvios.com", "www.starvios.com"}
 
 if urlparse(URL).hostname not in HOSTS_PERMITIDOS:
