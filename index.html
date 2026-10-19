@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+    <title>Directo de @pupilogames — Starvios</title>
+    <!-- Tailwind CSS v4 CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <style>
+        body { background-color: #0e0e10; color: #efeff1; font-family: ui-sans-serif, system-ui, sans-serif; }
+        .bg-cinema { background-color: #0e0e10; }
+        .bg-cinema-elevated { background-color: #18181b; }
+        .bg-cinema-soft { background-color: #27272a; }
+        .border-cinema-soft { border-color: #27272a; }
+        .text-cinema-foreground { color: #efeff1; }
+        .text-cinema-muted { color: #71717a; }
+        .text-signal { color: #9146ff; }
+        .bg-signal { background-color: #9146ff; }
+    </style>
+</head>
+<body class="min-h-[100dvh] bg-cinema text-cinema-foreground overflow-hidden">
+    
+    <!-- Header Principal -->
+    <header class="sticky top-0 z-40 border-b backdrop-blur border-cinema-soft bg-cinema/90">
+        <div class="grid h-14 w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-1 px-3 sm:h-16 sm:grid-cols-[auto_auto_minmax(0,1fr)_auto] sm:gap-2 sm:px-2">
+            <button class="inline-flex items-center justify-center p-2 rounded-md hover:bg-zinc-800" aria-label="Menú">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16"/><path d="M4 12h16"/><path d="M4 19h16"/></svg>
+            </button>
+            <a class="flex w-24 min-w-0 items-center font-bold text-lg" href="#">Starvios</a>
+            <div class="ml-auto flex items-center gap-2">
+                <span class="text-sm font-semibold">@bryan_</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- Contenedor General -->
+    <div class="flex w-full h-[calc(100dvh-4rem)]">
+        
+        <!-- Sidebar lateral -->
+        <aside class="hidden lg:block w-56 border-r border-cinema-soft p-3 overflow-y-auto bg-cinema">
+            <nav class="flex flex-col gap-1 text-sm font-medium text-cinema-muted">
+                <a href="#" class="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-cinema-elevated hover:text-cinema-foreground">Inicio</a>
+                <a href="#" class="flex items-center gap-3 px-3 py-2 rounded-lg bg-cinema-soft text-cinema-foreground">Directos</a>
+                <a href="#" class="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-cinema-elevated hover:text-cinema-foreground">Siguiendo</a>
+            </nav>
+        </aside>
+
+        <!-- Área de Contenido Principal -->
+        <main class="flex-1 p-3 overflow-y-auto">
+            <div class="lg:grid lg:grid-cols-[minmax(0,1fr)_360px] lg:gap-5 h-full">
+                
+                <!-- Columna Izquierda: Reproductor y Datos del Streamer -->
+                <div class="flex flex-col gap-4">
+                    <!-- Reproductor de Video -->
+                    <div class="relative w-full aspect-video bg-black rounded-lg overflow-hidden border border-cinema-soft">
+                        <video class="size-full object-contain" controls autoplay muted src="https://www.w3schools.com/html/mov_bbb.mp4"></video>
+                    </div>
+
+                    <!-- Info del Stream -->
+                    <div class="flex items-start gap-3">
+                        <div class="size-12 rounded-full bg-zinc-700 overflow-hidden flex-shrink-0">
+                            <img src="https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100" class="size-full object-cover" alt="Avatar">
+                        </div>
+                        <div>
+                            <h1 class="text-lg font-bold">pupilogames</h1>
+                            <p class="text-sm text-cinema-muted">AO VIVO! GAMEPLAYS ALEATORIAS🔥</p>
+                            <div class="flex gap-2 mt-1 text-xs">
+                                <span class="text-signal font-semibold">AION 2</span>
+                                <span class="text-cinema-muted">17 espectadores</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Columna Derecha: Chat en Directo (Mantiene los selectores exactos) -->
+                <div class="flex flex-col h-[500px] lg:h-full bg-cinema-elevated border border-cinema-soft rounded-lg overflow-hidden mt-4 lg:mt-0">
+                    <!-- Cabecera del Chat -->
+                    <div class="flex items-center justify-between border-b border-cinema-soft px-3 py-2.5">
+                        <span class="font-display text-sm font-semibold uppercase tracking-wider">Chat en directo</span>
+                    </div>
+
+                    <!-- Contenedor de Mensajes con la clase exacta -->
+                    <div class="overscroll-contain flex-1 overflow-y-auto p-2 space-y-1 text-sm">
+                        <div class="flex items-start gap-1.5 px-1.5 py-1">
+                            <div class="min-w-0 flex-1">
+                                <p class="break-words leading-relaxed">
+                                    <span class="font-semibold" style="color: rgb(244, 197, 66);">thunderstrauss</span>
+                                    <span class="text-cinema-muted">:</span>
+                                    <span class="text-foreground/90">boa noite pupiloo</span>
+                                </p>
+                            </div>
+                        </div>
+                        <div class="flex items-start gap-1.5 px-1.5 py-1">
+                            <div class="min-w-0 flex-1">
+                                <p class="break-words leading-relaxed">
+                                    <span class="font-semibold" style="color: rgb(56, 189, 248);">outrosjogos</span>
+                                    <span class="text-cinema-muted">:</span>
+                                    <span class="text-foreground/90">salve</span>
+                                </p>
+                            </div>
+                        </div>
+                        <div class="flex items-start gap-1.5 px-1.5 py-1">
+                            <div class="min-w-0 flex-1">
+                                <p class="break-words leading-relaxed">
+                                    <span class="font-semibold" style="color: rgb(56, 189, 248);">turomantic</span>
+                                    <span class="text-cinema-muted">:</span>
+                                    <span class="text-foreground/90">cuanto tiempo dura para solicitud del paner</span>
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Formulario de Entrada (Input y Botón de Enviar) -->
+                    <div class="border-t border-cinema-soft p-3">
+                        <form class="space-y-2" onsubmit="event.preventDefault();">
+                            <div class="flex gap-2">
+                                <div class="relative flex-1">
+                                    <input maxlength="300" 
+                                           class="w-full h-9 bg-background border border-cinema-soft rounded-md px-3 text-sm text-foreground outline-none focus:ring-2 focus:ring-signal" 
+                                           placeholder="Escribe un mensaje…">
+                                </div>
+                                <button type="submit" 
+                                        aria-label="Enviar" 
+                                        class="inline-flex items-center justify-center bg-signal text-white font-medium h-9 px-4 rounded-md transition-colors cursor-pointer hover:bg-signal/90">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/></svg>
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+            </div>
+        </main>
+    </div>
+
+</body>
+</html>
