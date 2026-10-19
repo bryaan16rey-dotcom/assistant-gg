@@ -991,6 +991,26 @@ async def leer_sesion_starvios(pagina, etiqueta: str) -> str | None:
         return None
 
 
+async def esperar_formulario_starvios_listo(pagina) -> bool:
+    """Wait until React has hydrated the login form and attached its submit handler."""
+    try:
+        await pagina.wait_for_function(
+            """() => {
+                const formulario = document.querySelector('form');
+                if (!formulario) return false;
+                const clave = Object.keys(formulario).find(
+                    (nombre) => nombre.startsWith('__reactProps$')
+                );
+                return Boolean(clave && typeof formulario[clave].onSubmit === 'function');
+            }""",
+            timeout=20_000,
+        )
+        return True
+    except PlaywrightError:
+        print("DIAG formulario: React aún no había hidratado el formulario; se intentará igualmente.")
+        return False
+
+
 async def iniciar_sesion_en_formulario(pagina, actor: dict) -> str | None:
     """Log in through Starvios' own form so its Supabase client creates the session."""
     print(f"🔐 Iniciando sesión de {actor['name']} en el formulario de Starvios.")
@@ -1000,20 +1020,38 @@ async def iniciar_sesion_en_formulario(pagina, actor: dict) -> str | None:
         password = pagina.locator("#password")
         await email.wait_for(state="visible", timeout=15_000)
         await password.wait_for(state="visible", timeout=5_000)
-        await email.fill(actor["email"])
-        await password.fill(actor["password"])
-        boton = pagina.locator("form button[type='submit']").first
-        if await boton.count() == 0:
-            boton = pagina.get_by_role("button", name="Entrar", exact=True)
+        await esperar_formulario_starvios_listo(pagina)
+
         respuesta_token = None
-        try:
-            async with pagina.expect_response(
-                lambda respuesta: "/auth/v1/token" in respuesta.url, timeout=20_000
-            ) as espera:
-                await boton.click()
-            respuesta_token = await espera.value
-        except PlaywrightError:
-            print("DIAG formulario: no hubo respuesta de /auth/v1/token.")
+        for intento in range(1, 3):
+            if intento > 1:
+                print("DIAG formulario: recargando para reintentar el envío.")
+                await pagina.reload(wait_until="domcontentloaded", timeout=30_000)
+                await email.wait_for(state="visible", timeout=15_000)
+                await password.wait_for(state="visible", timeout=5_000)
+                await esperar_formulario_starvios_listo(pagina)
+            await email.fill(actor["email"])
+            await password.fill(actor["password"])
+            await pagina.wait_for_timeout(400)
+            boton = pagina.locator("form button[type='submit']").first
+            if await boton.count() == 0:
+                boton = pagina.get_by_role("button", name="Entrar", exact=True)
+            try:
+                async with pagina.expect_response(
+                    lambda respuesta: (
+                        respuesta.request.method == "POST"
+                        and "/auth/v1/token" in respuesta.url
+                    ),
+                    timeout=20_000,
+                ) as espera:
+                    await boton.click()
+                respuesta_token = await espera.value
+            except PlaywrightError:
+                print(
+                    f"DIAG formulario: intento {intento} sin respuesta POST de /auth/v1/token."
+                )
+            if respuesta_token is not None:
+                break
         if respuesta_token is not None:
             print(f"DIAG formulario token: HTTP {respuesta_token.status}.")
             if respuesta_token.status != 200:
@@ -1027,11 +1065,11 @@ async def iniciar_sesion_en_formulario(pagina, actor: dict) -> str | None:
                 except Exception:
                     print("DIAG formulario error: respuesta no JSON.")
         try:
-            await pagina.wait_for_url(lambda url: "/auth" not in url, timeout=10_000)
+            await pagina.wait_for_url(lambda url: "/auth" not in url, timeout=15_000)
         except PlaywrightError:
             # Some sessions stay on /auth but are still stored correctly.
             pass
-        await pagina.wait_for_timeout(1500)
+        await pagina.wait_for_timeout(1200)
         sesion_json = await leer_sesion_starvios(pagina, actor["name"])
         if sesion_json:
             print(f"✅ Formulario de {actor['name']} autenticado correctamente.")
@@ -1168,35 +1206,41 @@ async def abrir_sesion_actor(navegador, actor: dict, actores: dict) -> None:
     entrada = pagina.locator(CHAT_INPUT_SELECTOR)
     try:
         await entrada.wait_for(state="visible", timeout=10_000)
-    except PlaywrightError as error:
+    except PlaywrightError:
+        print("DIAG: la app no mostró el chat; recargando una vez para releer la sesión.")
         try:
-            sesion_presente = await pagina.evaluate(
-                "clave => Boolean(localStorage.getItem(clave))", STARVIOS_AUTH_STORAGE_KEY
-            )
-        except PlaywrightError:
-            sesion_presente = False
-        try:
-            aviso_login = await pagina.get_by_text(
-                re.compile(
-                    r"log in|login|sign in|inicia sesión|entrar para chatear",
-                    re.IGNORECASE,
+            await pagina.reload(wait_until="domcontentloaded", timeout=30_000)
+            await pagina.wait_for_timeout(8_000)
+            await entrada.wait_for(state="visible", timeout=10_000)
+        except PlaywrightError as error:
+            try:
+                sesion_presente = await pagina.evaluate(
+                    "clave => Boolean(localStorage.getItem(clave))", STARVIOS_AUTH_STORAGE_KEY
                 )
-            ).count() > 0
-        except PlaywrightError:
-            aviso_login = False
-        await diagnosticar_sesion_starvios(pagina, actor["name"])
-        if diagnostico_consola:
-            print("--- Diagnóstico del navegador ---")
-            for linea in diagnostico_consola[-40:]:
-                print(linea)
-        raise RuntimeError(
-            f"No se ve el campo de chat con la sesión de {actor['name']}. "
-            f"localStorage {'contiene' if sesion_presente else 'no contiene'} la clave "
-            f"'{STARVIOS_AUTH_STORAGE_KEY}'; la página "
-            f"{'muestra' if aviso_login else 'no muestra'} el aviso de login. "
-            "Revisa las credenciales del formulario, el JSON de sesión o la verificación "
-            "en dos pasos de la cuenta."
-        ) from error
+            except PlaywrightError:
+                sesion_presente = False
+            try:
+                aviso_login = await pagina.get_by_text(
+                    re.compile(
+                        r"log in|login|sign in|inicia sesión|entrar para chatear",
+                        re.IGNORECASE,
+                    )
+                ).count() > 0
+            except PlaywrightError:
+                aviso_login = False
+            await diagnosticar_sesion_starvios(pagina, actor["name"])
+            if diagnostico_consola:
+                print("--- Diagnóstico del navegador ---")
+                for linea in diagnostico_consola[-40:]:
+                    print(linea)
+            raise RuntimeError(
+                f"No se ve el campo de chat con la sesión de {actor['name']}. "
+                f"localStorage {'contiene' if sesion_presente else 'no contiene'} la clave "
+                f"'{STARVIOS_AUTH_STORAGE_KEY}'; la página "
+                f"{'muestra' if aviso_login else 'no muestra'} el aviso de login. "
+                "Revisa las credenciales del formulario, el JSON de sesión o la verificación "
+                "en dos pasos de la cuenta."
+            ) from error
     # No se automatiza el seguimiento: los términos de Starvios prohíben inflar
     # seguidores con bots o cuentas falsas.
     actor["started"] = time.monotonic()
