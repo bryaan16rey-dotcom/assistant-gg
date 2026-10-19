@@ -53,7 +53,13 @@ La memoria temporal conserva hasta tres minutos de transcripción y de mensajes
 nuevos del chat. Ignora lo que ya estaba visible al arrancar. La transcripción
 usa solo la fuente que se conecte a la entrada `CABLE Output` del puente local;
 por configuración, esa fuente será la monitorización exclusiva del micrófono
-de OBS. No analiza la imagen ni debe afirmar que vio jugadas.
+de OBS. Además, cada 60 segundos toma una captura del elemento de video del
+directo y Groq Vision genera una descripción breve para aportar contexto visual.
+La captura no se guarda en disco, R2 ni GitHub, pero sí se envía a Groq para
+analizarla; puede incluir la cámara u otros elementos que aparezcan dentro del
+video. El bot usa un solo fotograma, no ve el video continuamente, y debe tratar
+la descripción como parcial: no afirmar jugadas o secuencias que la imagen no
+confirme.
 
 ## Prueba de audio y envío
 
@@ -64,8 +70,10 @@ cinco minutos. Los registros muestran solo el número de caracteres de una
 transcripción y el conteo de borradores: nunca muestran las palabras habladas ni
 el texto del borrador. En el resumen de Actions, confirma que hubo transcripción
 y que se generó un borrador tras decir, por ejemplo, “Mari, es una prueba de
-audio, ¿me saludas?”. Si el directo no está activo o no llega audio, la prueba
-puede finalizar sin borrador.
+audio, ¿me saludas?”. Durante el directo también debe aparecer en los registros
+el indicador genérico de que se analizó un fotograma, sin mostrar su contenido.
+Si no hay reproductor activo o no llega audio, la prueba puede finalizar sin
+borrador; si la imagen no se puede capturar, el bot continúa usando voz y chat.
 
 Los fragmentos se transmiten cifrados por HTTPS, se guardan temporalmente en R2
 hasta que el bot los transcribe y confirma, y no se guardan en el repositorio.
