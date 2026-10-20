@@ -1138,6 +1138,50 @@ async def diagnosticar_sesion_starvios(pagina, etiqueta: str) -> None:
         print(f"DIAG sesión {etiqueta}: no se pudo evaluar ({type(error).__name__}).")
 
 
+async def diagnosticar_cliente_starvios(pagina, etiqueta: str) -> None:
+    """Inspect the app's own Supabase client without exposing tokens."""
+    try:
+        datos = await pagina.evaluate(
+            """async () => {
+                const urlCliente = performance.getEntriesByType('resource')
+                    .map((entrada) => entrada.name)
+                    .find((nombre) =>
+                        nombre.includes('/assets/client-') && nombre.endsWith('.js')
+                    );
+                if (!urlCliente) return {cliente: false};
+                const modulo = await import(urlCliente);
+                const cliente = modulo.t;
+                const resultado = await cliente.auth.getSession();
+                return {
+                    cliente: true,
+                    storageKey: cliente.auth.storageKey,
+                    session: resultado.data.session
+                        ? {
+                            user_id: resultado.data.session.user?.id ?? null,
+                            expires_at: resultado.data.session.expires_at ?? null,
+                            access_token_len: (
+                                resultado.data.session.access_token || ''
+                            ).length,
+                        }
+                        : null,
+                    error: resultado.error
+                        ? {
+                            name: resultado.error.name,
+                            message: String(resultado.error.message || '').slice(0, 200),
+                            status: resultado.error.status ?? null,
+                        }
+                        : null,
+                };
+            }"""
+        )
+        print(f"DIAG cliente {etiqueta}: {datos}")
+    except Exception as error:
+        print(
+            f"DIAG cliente {etiqueta}: no se pudo consultar "
+            f"({type(error).__name__}: {str(error)[:200]})."
+        )
+
+
 async def esperar_sesion_starvios_activa(pagina) -> bool:
     """Wait until the SPA header reflects the logged-in user before navigating internally."""
     try:
@@ -1275,6 +1319,8 @@ async def abrir_sesion_actor(navegador, actor: dict, actores: dict) -> None:
     if not navegado_en_spa:
         await pagina.goto(URL, wait_until="domcontentloaded", timeout=30_000)
     await pagina.wait_for_timeout(8_000)
+    if navegado_en_spa:
+        await diagnosticar_cliente_starvios(pagina, f"{actor['name']} tras navegación SPA")
     entrada = pagina.locator(CHAT_INPUT_SELECTOR)
     try:
         await entrada.wait_for(state="visible", timeout=10_000)
@@ -1329,6 +1375,7 @@ async def abrir_sesion_actor(navegador, actor: dict, actores: dict) -> None:
                     f"DIAG hidratación: no se pudo evaluar "
                     f"({type(error_hidratacion).__name__})."
                 )
+            await diagnosticar_cliente_starvios(pagina, f"{actor['name']} tras recarga")
             await diagnosticar_sesion_starvios(pagina, actor["name"])
             if diagnostico_errores:
                 print("--- Errores del navegador ---")
