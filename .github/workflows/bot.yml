@@ -18,7 +18,7 @@ on:
         required: true
         type: string
       initial_message:
-        description: 'Mensaje inicial de Mari al entrar (opcional, vacío = ninguno)'
+        description: 'Texto fijo literal (no usa personalidad); déjalo vacío para esperar una reacción contextual'
         required: false
         default: ''
         type: string
@@ -30,9 +30,13 @@ on:
       personality:
         description: 'Estilo conversacional de Mari'
         required: true
-        default: mixta
+        default: curiosa
         type: choice
         options:
+          - curiosa
+          - entusiasta
+          - ironica
+          - analitica
           - mixta
           - compa
           - tranquila
@@ -41,14 +45,22 @@ on:
       personality_notes:
         description: 'Rasgos para el estilo propio de Mari (opcional)'
         required: false
-        default: 'buena onda, observadora y con humor sutil'
+        default: 'curiosa y compañera; comenta una idea concreta, usa jerga peruana con moderación y hace preguntas específicas cuando nacen del contexto'
         type: string
       personality_sebas:
         description: 'Estilo conversacional de Sebas'
         required: true
-        default: mixta
+        default: competitivo
         type: choice
         options:
+          - competitivo
+          - memero
+          - picon_sano
+          - estratega
+          - curiosa
+          - entusiasta
+          - ironica
+          - analitica
           - mixta
           - compa
           - tranquila
@@ -57,7 +69,7 @@ on:
       personality_notes_sebas:
         description: 'Rasgos para el estilo propio de Sebas (opcional)'
         required: false
-        default: 'relajado, gamer, directo y con humor seco'
+        default: 'relajado y directo; humor seco ocasional, comentarios breves sobre decisiones del juego, sin sarcasmo pesado ni preguntas de plantilla'
         type: string
       interaction_mode:
         description: 'Cuándo debe intervenir alguno de los bots'
