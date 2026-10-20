@@ -673,6 +673,7 @@ def decidir_interaccion(
 
 def generar_comentario_groq(contexto: str, actor: dict) -> str | None:
     cliente = Groq(api_key=GROQ_API_KEY)
+    turno_proactivo = "Tipo de intervención: comentario_contextual_del_stream" in contexto
     estilos = {
         "compa": "Compa peruana gamer/dotera: relajada, cercana, humor ligero y jerga natural sin exagerarla.",
         "tranquila": "Espectadora tranquila: comenta poco, con calma, sin bromas forzadas ni interrumpir.",
@@ -717,10 +718,19 @@ def generar_comentario_groq(contexto: str, actor: dict) -> str | None:
         "a usuarios reales. Si el destinatario o la relación no son claros, devuelve exactamente SKIP. No afirmes "
         "haber visto jugadas o eventos ausentes de la transcripción; no inventes contexto ni repitas algo "
         "que ya se respondió. No tienes video ni contexto visual; no afirmes haber visto el juego ni una jugada. "
-        "Si no tienes audio transcrito pertinente o una pregunta clara del chat, devuelve SKIP. Escribe en español "
+        "Si no tienes audio transcrito pertinente o una pregunta clara del chat en un turno de respuesta, devuelve SKIP. "
+        "Escribe en español "
         "peruano natural, breve, cálido y respetuoso; evita frases "
         "de plantilla y saludos genéricos. Máximo 160 caracteres. Devuelve solo el mensaje o SKIP."
     )
+    if turno_proactivo:
+        system_prompt += (
+            " Este es un turno espontáneo de espectadora: no esperes que Bryan te llame ni que haga una pregunta. "
+            "Si la transcripción contiene una idea entendible del directo, intenta una reacción breve, "
+            "una opinión casual o una pregunta específica relacionada con lo que acaba de decir; no respondas "
+            "como presentadora. Devuelve SKIP solo si el audio es ininteligible, no contiene una idea del "
+            "streamer, es ajeno al directo o el tema ya quedó respondido. No inventes detalles para llenar el turno."
+        )
     try:
         respuesta = cliente.chat.completions.create(
             model="openai/gpt-oss-120b",
