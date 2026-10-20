@@ -826,15 +826,78 @@ async def obtener_contexto_stream(
     return contexto, mencionados, filas
 
 
+def candidatos_campo_chat() -> list[str]:
+    """Selectors for the chat input, from the configured one to structural fallbacks."""
+    candidatos = [
+        CHAT_INPUT_SELECTOR,
+        'form:has(input[maxlength="300"]) input[maxlength="300"]',
+        'input[maxlength="300"]',
+        'input[placeholder*="mensaje" i]',
+        'input[placeholder*="message" i]',
+        'textarea[placeholder*="mensaje" i]',
+        'textarea[placeholder*="message" i]',
+        'textarea',
+        '[contenteditable="true"]',
+    ]
+    return list(dict.fromkeys(candidato for candidato in candidatos if candidato))
+
+
+async def localizar_campo_chat(pagina):
+    """Return the first visible chat input and the selector that found it."""
+    for selector in candidatos_campo_chat():
+        try:
+            localizador = pagina.locator(selector)
+            if await localizador.count() == 0:
+                continue
+            primero = localizador.first
+            if await primero.is_visible():
+                return primero, selector
+        except PlaywrightError:
+            continue
+    return None, ""
+
+
+async def localizar_boton_envio(pagina, campo):
+    """Find the send button, preferably inside the same form as the chat input."""
+    candidatos = [
+        CHAT_SEND_SELECTOR,
+        'button[aria-label="Enviar"]',
+        'button[aria-label="Send"]',
+    ]
+    for selector in dict.fromkeys(candidato for candidato in candidatos if candidato):
+        try:
+            localizador = pagina.locator(selector)
+            if await localizador.count() == 0:
+                continue
+            primero = localizador.first
+            if await primero.is_visible():
+                return primero, selector
+        except PlaywrightError:
+            continue
+    try:
+        formulario = campo.locator("xpath=ancestor::form[1]")
+        if await formulario.count():
+            for selector in ('button[type="submit"]', "button"):
+                localizador = formulario.locator(selector).last
+                if await localizador.count() == 0:
+                    continue
+                if await localizador.is_visible():
+                    return localizador, f"form {selector}"
+    except PlaywrightError:
+        pass
+    return None, ""
+
+
 async def publicar_y_verificar(
     pagina, texto: str, estado: dict, actor_id: str, etiqueta: str
 ) -> None:
-    entrada = pagina.locator(CHAT_INPUT_SELECTOR)
-    boton = pagina.locator(CHAT_SEND_SELECTOR)
-    mensajes = pagina.locator(CHAT_MESSAGE_SELECTOR)
+    entrada, selector_entrada = await localizar_campo_chat(pagina)
+    if entrada is None:
+        raise RuntimeError("No se encontró el campo de chat en Starvios.")
+    boton, selector_boton = await localizar_boton_envio(pagina, entrada)
+    mensajes = pagina.locator(CHAT_MESSAGE_SELECTOR) if CHAT_MESSAGE_SELECTOR else None
     await entrada.wait_for(state="visible", timeout=15_000)
-    await boton.wait_for(state="visible", timeout=15_000)
-    print(f"🎯 Campo de chat localizado con: {CHAT_INPUT_SELECTOR}")
+    print(f"🎯 Campo de chat localizado con: {selector_entrada}")
     await entrada.fill("")
     texto_publico = f"{etiqueta} {texto}"[:280]
     await entrada.fill(texto_publico)
@@ -843,17 +906,25 @@ async def publicar_y_verificar(
         print("🧪 DRY_RUN activo: texto escrito, no se enviará ningún mensaje.")
         return
 
+    if boton is None:
+        raise RuntimeError("No se encontró el botón de envío del chat en Starvios.")
     permitido, razon = puede_publicar(estado, actor_id)
     if not permitido:
         await entrada.fill("")
         print(f"⏭️ {razon}")
         return
+    print(f"📤 Botón de envío localizado con: {selector_boton}")
     await boton.click()
     # Registrar después de solicitar el envío evita duplicados si falla la verificación.
     registrar_publicacion(estado, texto_publico, actor_id)
     print("📤 Envío solicitado; verificando que aparezca en el chat...")
-    await mensajes.filter(has_text=texto_publico).last.wait_for(state="visible", timeout=12_000)
-    print("✅ Mensaje confirmado en el chat.")
+    if mensajes is not None:
+        await mensajes.filter(has_text=texto_publico).last.wait_for(
+            state="visible", timeout=12_000
+        )
+        print("✅ Mensaje confirmado en el chat.")
+    else:
+        print("⚠️ CHAT_MESSAGE_SELECTOR no está configurado; no se pudo verificar visualmente.")
 
 
 def actor_mencionado(
@@ -1182,6 +1253,60 @@ async def diagnosticar_cliente_starvios(pagina, etiqueta: str) -> None:
         )
 
 
+async def diagnosticar_pagina_chat(
+    pagina, etiqueta: str, captura: str | None = None
+) -> None:
+    """Log the actor page state without exposing credentials or tokens."""
+    try:
+        datos = await pagina.evaluate(
+            """() => {
+                const elementos = Array.from(
+                    document.querySelectorAll('input,textarea,[contenteditable="true"]')
+                ).map((elemento) => ({
+                    tag: elemento.tagName,
+                    type: elemento.getAttribute('type') || '',
+                    maxlength: elemento.getAttribute('maxlength'),
+                    placeholder: elemento.getAttribute('placeholder') || '',
+                    aria: elemento.getAttribute('aria-label') || '',
+                    visible: Boolean(
+                        elemento.offsetWidth ||
+                        elemento.offsetHeight ||
+                        elemento.getClientRects().length
+                    ),
+                }));
+                return {
+                    url: location.href,
+                    title: document.title,
+                    lang: document.documentElement.lang,
+                    navLang: navigator.language,
+                    enlaceStudio: Boolean(document.querySelector('a[href="/studio"]')),
+                    enlaceLogin: Boolean(document.querySelector('a[href="/auth"]')),
+                    router: Boolean(window.__TSR_ROUTER__),
+                    campos: elementos.slice(0, 15),
+                    textoFinal: (document.body.innerText || '').slice(-250),
+                };
+            }"""
+        )
+        print(f"DIAG página chat {etiqueta}: {datos}")
+    except Exception as error:
+        print(f"DIAG página chat {etiqueta}: no se pudo evaluar ({type(error).__name__}).")
+    for selector in candidatos_campo_chat():
+        try:
+            localizador = pagina.locator(selector)
+            total = await localizador.count()
+            visible = await localizador.first.is_visible() if total else False
+            if total:
+                print(f"DIAG candidato chat [{selector}]: count={total} visible={visible}")
+        except PlaywrightError:
+            continue
+    if captura:
+        try:
+            await pagina.screenshot(path=captura, full_page=False)
+            print(f"DIAG captura de la página del actor: {captura}")
+        except PlaywrightError:
+            pass
+
+
 async def esperar_sesion_starvios_activa(pagina) -> bool:
     """Wait until the SPA header reflects the logged-in user before navigating internally."""
     try:
@@ -1209,7 +1334,16 @@ async def navegar_sin_recarga(pagina, url: str) -> bool:
         )
         await pagina.wait_for_timeout(800)
         resultado = await pagina.evaluate(
-            """(ruta) => {
+            """async (ruta) => {
+                const router = window.__TSR_ROUTER__;
+                if (router && typeof router.navigate === 'function') {
+                    try {
+                        await router.navigate({ to: ruta });
+                        return location.pathname;
+                    } catch (error) {
+                        // Fall back to the History API below.
+                    }
+                }
                 try {
                     history.pushState({}, '', ruta);
                     window.dispatchEvent(new PopStateEvent('popstate', { state: history.state }));
@@ -1231,9 +1365,37 @@ async def navegar_sin_recarga(pagina, url: str) -> bool:
         return False
 
 
+async def navegar_con_router(pagina, url: str) -> bool:
+    """Retry the internal navigation using the router instance exposed by the SPA."""
+    ruta = urlparse(url).path or "/"
+    try:
+        resultado = await pagina.evaluate(
+            """async (ruta) => {
+                const router = window.__TSR_ROUTER__;
+                if (!router || typeof router.navigate !== 'function') return 'sin_router';
+                try {
+                    await router.navigate({ to: ruta });
+                    return location.pathname;
+                } catch (error) {
+                    return 'error:' + String(error).slice(0, 200);
+                }
+            }""",
+            ruta,
+        )
+        print(f"DIAG navegación con router a {resultado}.")
+        await pagina.wait_for_timeout(4000)
+        return resultado == ruta
+    except PlaywrightError as error:
+        print(f"DIAG navegación con router falló ({type(error).__name__}).")
+        return False
+
+
 async def abrir_sesion_actor(navegador, actor: dict, actores: dict) -> None:
     contexto = await navegador.new_context(
-        viewport={"width": 1366, "height": 768}, locale="es-PE", timezone_id="America/Lima"
+        viewport={"width": 1366, "height": 768},
+        locale="en-US",
+        timezone_id="America/Lima",
+        extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
     )
     actor["context"] = contexto
     pagina = await contexto.new_page()
@@ -1321,78 +1483,67 @@ async def abrir_sesion_actor(navegador, actor: dict, actores: dict) -> None:
     await pagina.wait_for_timeout(8_000)
     if navegado_en_spa:
         await diagnosticar_cliente_starvios(pagina, f"{actor['name']} tras navegación SPA")
-    entrada = pagina.locator(CHAT_INPUT_SELECTOR)
-    try:
-        await entrada.wait_for(state="visible", timeout=10_000)
-    except PlaywrightError:
-        print("DIAG: la app no mostró el chat; recargando una vez para releer la sesión.")
+        await diagnosticar_pagina_chat(
+            pagina, f"{actor['name']} tras navegación SPA", captura="resultado_spa.png"
+        )
+
+    campo, selector_campo = await localizar_campo_chat(pagina)
+    if campo is None and navegado_en_spa:
+        print("DIAG: no se encontró el chat; reintentando con el router de la SPA.")
+        if await navegar_con_router(pagina, URL):
+            await pagina.wait_for_timeout(5_000)
+        await diagnosticar_pagina_chat(
+            pagina, f"{actor['name']} tras router", captura="resultado_router.png"
+        )
+        campo, selector_campo = await localizar_campo_chat(pagina)
+
+    if campo is None:
+        print("DIAG: el chat no apareció en la SPA; probando una carga completa.")
+        await pagina.goto(URL, wait_until="domcontentloaded", timeout=30_000)
+        await pagina.wait_for_timeout(8_000)
+        await diagnosticar_pagina_chat(
+            pagina, f"{actor['name']} tras carga completa", captura="resultado_carga.png"
+        )
+        campo, selector_campo = await localizar_campo_chat(pagina)
+
+    if campo is None:
         try:
-            await pagina.reload(wait_until="domcontentloaded", timeout=30_000)
-            await pagina.wait_for_timeout(8_000)
-            await entrada.wait_for(state="visible", timeout=10_000)
-        except PlaywrightError as error:
-            try:
-                sesion_presente = await pagina.evaluate(
-                    "clave => Boolean(localStorage.getItem(clave))", STARVIOS_AUTH_STORAGE_KEY
+            sesion_presente = await pagina.evaluate(
+                "clave => Boolean(localStorage.getItem(clave))", STARVIOS_AUTH_STORAGE_KEY
+            )
+        except PlaywrightError:
+            sesion_presente = False
+        try:
+            aviso_login = await pagina.get_by_text(
+                re.compile(
+                    r"log in|login|sign in|inicia sesión|entrar para chatear",
+                    re.IGNORECASE,
                 )
-            except PlaywrightError:
-                sesion_presente = False
-            try:
-                aviso_login = await pagina.get_by_text(
-                    re.compile(
-                        r"log in|login|sign in|inicia sesión|entrar para chatear",
-                        re.IGNORECASE,
-                    )
-                ).count() > 0
-            except PlaywrightError:
-                aviso_login = False
-            try:
-                hidratacion = await pagina.evaluate(
-                    """() => {
-                        const enlace = Array.from(document.querySelectorAll('a,button')).find(
-                            (elemento) =>
-                                elemento.getAttribute('href') === '/auth' ||
-                                /^(log in|entrar)$/i.test((elemento.textContent || '').trim())
-                        );
-                        const claves = enlace ? Object.keys(enlace) : [];
-                        return {
-                            lang: document.documentElement.lang,
-                            url: location.href,
-                            enlaceLogin: Boolean(enlace),
-                            enlaceHidratado: claves.some((clave) =>
-                                clave.startsWith('__reactProps$')
-                            ),
-                            listaScripts: Array.from(document.scripts)
-                                .map((script) => script.src)
-                                .filter(Boolean)
-                                .length,
-                        };
-                    }"""
-                )
-                print(f"DIAG hidratación: {hidratacion}")
-            except Exception as error_hidratacion:
-                print(
-                    f"DIAG hidratación: no se pudo evaluar "
-                    f"({type(error_hidratacion).__name__})."
-                )
-            await diagnosticar_cliente_starvios(pagina, f"{actor['name']} tras recarga")
-            await diagnosticar_sesion_starvios(pagina, actor["name"])
-            if diagnostico_errores:
-                print("--- Errores del navegador ---")
-                for linea in diagnostico_errores[-30:]:
-                    print(linea)
-            if diagnostico_consola:
-                print("--- Diagnóstico del navegador ---")
-                for linea in diagnostico_consola[-40:]:
-                    print(linea)
-            raise RuntimeError(
-                f"No se ve el campo de chat con la sesión de {actor['name']}. "
-                f"localStorage {'contiene' if sesion_presente else 'no contiene'} la clave "
-                f"'{STARVIOS_AUTH_STORAGE_KEY}'; la página "
-                f"{'muestra' if aviso_login else 'no muestra'} el aviso de login. "
-                "Revisa las credenciales del formulario, el JSON de sesión o la verificación "
-                "en dos pasos de la cuenta."
-            ) from error
+            ).count() > 0
+        except PlaywrightError:
+            aviso_login = False
+        await diagnosticar_cliente_starvios(pagina, f"{actor['name']} final")
+        await diagnosticar_sesion_starvios(pagina, actor["name"])
+        if diagnostico_errores:
+            print("--- Errores del navegador ---")
+            for linea in diagnostico_errores[-30:]:
+                print(linea)
+        if diagnostico_consola:
+            print("--- Diagnóstico del navegador ---")
+            for linea in diagnostico_consola[-40:]:
+                print(linea)
+        raise RuntimeError(
+            f"No se ve el campo de chat con la sesión de {actor['name']}. "
+            f"localStorage {'contiene' if sesion_presente else 'no contiene'} la clave "
+            f"'{STARVIOS_AUTH_STORAGE_KEY}'; la página "
+            f"{'muestra' if aviso_login else 'no muestra'} el aviso de login. "
+            "Revisa las credenciales del formulario, el JSON de sesión o la verificación "
+            "en dos pasos de la cuenta."
+        )
+
+    actor["chat_input_selector"] = selector_campo
+    actor["chat_input"] = campo
+    print(f"🎯 Campo de chat de {actor['name']} localizado con: {selector_campo}")
     # No se automatiza el seguimiento: los términos de Starvios prohíben inflar
     # seguidores con bots o cuentas falsas.
     actor["started"] = time.monotonic()
@@ -1445,7 +1596,10 @@ async def ciclo_bot() -> None:
     async with async_playwright() as playwright:
         navegador = await playwright.chromium.launch(headless=True)
         observador = await navegador.new_context(
-            viewport={"width": 1366, "height": 768}, locale="es-PE", timezone_id="America/Lima"
+            viewport={"width": 1366, "height": 768},
+            locale="en-US",
+            timezone_id="America/Lima",
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
         )
         pagina = await observador.new_page()
         try:
