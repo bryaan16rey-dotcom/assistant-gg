@@ -725,11 +725,12 @@ def generar_comentario_groq(contexto: str, actor: dict) -> str | None:
     )
     if turno_proactivo:
         system_prompt += (
-            " Este es un turno espontáneo de espectadora: no esperes que Bryan te llame ni que haga una pregunta. "
-            "Si la transcripción contiene una idea entendible del directo, intenta una reacción breve, "
-            "una opinión casual o una pregunta específica relacionada con lo que acaba de decir; no respondas "
-            "como presentadora. Devuelve SKIP solo si el audio es ininteligible, no contiene una idea del "
-            "streamer, es ajeno al directo o el tema ya quedó respondido. No inventes detalles para llenar el turno."
+            " Este es un turno espontáneo de espectadora: no esperes que Bryan te llame, te mencione por nombre "
+            "ni haga una pregunta. No hay un destinatario individual en este turno; comenta al chat sobre lo que "
+            "Bryan acaba de decir. Si hay una frase inteligible y relacionada con el directo, escribe una reacción "
+            "breve y concreta (opinión casual, acuerdo/desacuerdo ligero o comentario sobre la idea), aunque no "
+            "haya pregunta. Evita preguntas genéricas, saludos y frases de presentadora. Devuelve SKIP solo si no "
+            "se entiende ninguna idea, el audio no trata del directo o el mismo tema ya fue comentado. No inventes."
         )
     try:
         respuesta = cliente.chat.completions.create(
@@ -1885,6 +1886,8 @@ async def ciclo_bot() -> None:
                     mencionados + usuarios_mencionados(transcripcion_reciente, usuarios_memoria)
                 ))
                 mensajes_nuevos = [fila for _, fila in memoria_chat]
+                # La transcripción puede tardar varios segundos; usa la hora
+                # actual para no retrasar artificialmente el primer turno proactivo.
                 ahora = time.time()
                 listos_proactivo = [
                     key for key, actor in actores.items()
@@ -1972,16 +1975,15 @@ async def ciclo_bot() -> None:
                     "Si Bryan ya resolvió exactamente la pregunta durante la espera, no la repitas; "
                     "el otro bot solo puede añadir algo distinto y claramente útil, si no devuelve SKIP."
                 )
-                if motivo == "comentario_contextual_del_stream":
-                    actor["next_proactive_check_at"] = time.time() + random.randint(
-                        *rango_pausa_actor(actor_id)
-                    )
                 frase = generar_comentario_groq(contexto_actual, actor)
                 if not DRY_RUN:
                     registrar_candidato_atendido(estado, candidato_huella, motivo)
                 if not frase:
                     print(f"⏭️ {actor['name']} no encontró algo útil que añadir.")
                     registrar_evento(resumen, "omitidos", f"{actor['name']} decidió no intervenir.")
+                    if motivo == "comentario_contextual_del_stream":
+                        actor["next_proactive_check_at"] = time.time() + random.randint(30, 60)
+                        print("🔁 Se volverá a evaluar el contexto en 30–60 s.")
                     continue
                 print(f"💡 Borrador de {actor['name']} generado; contenido omitido de los logs por privacidad.")
                 registrar_evento(resumen, "borradores", f"Borrador generado para {actor['name']}.")
@@ -1999,6 +2001,10 @@ async def ciclo_bot() -> None:
                 await publicar_y_verificar(
                     actor["page"], frase, estado, actor_id, actor["label"]
                 )
+                if motivo == "comentario_contextual_del_stream":
+                    actor["next_proactive_check_at"] = time.time() + random.randint(
+                        *rango_pausa_actor(actor_id)
+                    )
                 if not DRY_RUN:
                     registrar_evento(resumen, "enviados", f"Mensaje confirmado de {actor['name']}.")
                 if DRY_RUN:
