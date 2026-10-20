@@ -1147,22 +1147,38 @@ async def abrir_sesion_actor(navegador, actor: dict, actores: dict) -> None:
     actor["page"] = pagina
 
     diagnostico_consola: list[str] = []
+    diagnostico_errores: list[str] = []
 
     def anotar_diagnostico(texto: str) -> None:
         diagnostico_consola.append(redactar_diagnostico(texto))
         if len(diagnostico_consola) > 120:
             diagnostico_consola.pop(0)
 
+    def anotar_error(texto: str) -> None:
+        diagnostico_errores.append(redactar_diagnostico(texto, 500))
+        if len(diagnostico_errores) > 40:
+            diagnostico_errores.pop(0)
+
     def manejar_consola(mensaje) -> None:
-        if "DIAG_APP" in mensaje.text or mensaje.type in {"error", "warning"}:
+        if "DIAG_APP" in mensaje.text:
             anotar_diagnostico(f"console {mensaje.type}: {mensaje.text}")
+        elif mensaje.type in {"error", "warning"}:
+            anotar_error(f"console {mensaje.type}: {mensaje.text}")
+
+    def manejar_fallo(peticion) -> None:
+        url = peticion.url
+        if "starvios.com" in url or url.endswith(".js"):
+            anotar_error(f"requestfailed: {url.split('?')[0]}")
+
+    def manejar_respuesta(respuesta) -> None:
+        if respuesta.status >= 400 and "/auth/v1/" not in respuesta.url:
+            if "starvios.com" in respuesta.url or respuesta.url.endswith(".js"):
+                anotar_error(f"HTTP {respuesta.status} {respuesta.url.split('?')[0]}")
 
     pagina.on("console", manejar_consola)
-    pagina.on("pageerror", lambda error: anotar_diagnostico(f"pageerror: {error}"))
-    pagina.on(
-        "requestfailed",
-        lambda peticion: anotar_diagnostico(f"requestfailed: {peticion.url.split('?')[0]}"),
-    )
+    pagina.on("pageerror", lambda error: anotar_error(f"pageerror: {error}"))
+    pagina.on("requestfailed", manejar_fallo)
+    pagina.on("response", manejar_respuesta)
     await contexto.add_init_script(script=SCRIPT_DIAGNOSTICO_STARVIOS)
 
     sesion_json = None
@@ -1228,7 +1244,40 @@ async def abrir_sesion_actor(navegador, actor: dict, actores: dict) -> None:
                 ).count() > 0
             except PlaywrightError:
                 aviso_login = False
+            try:
+                hidratacion = await pagina.evaluate(
+                    """() => {
+                        const enlace = Array.from(document.querySelectorAll('a,button')).find(
+                            (elemento) =>
+                                elemento.getAttribute('href') === '/auth' ||
+                                /^(log in|entrar)$/i.test((elemento.textContent || '').trim())
+                        );
+                        const claves = enlace ? Object.keys(enlace) : [];
+                        return {
+                            lang: document.documentElement.lang,
+                            url: location.href,
+                            enlaceLogin: Boolean(enlace),
+                            enlaceHidratado: claves.some((clave) =>
+                                clave.startsWith('__reactProps$')
+                            ),
+                            listaScripts: Array.from(document.scripts)
+                                .map((script) => script.src)
+                                .filter(Boolean)
+                                .length,
+                        };
+                    }"""
+                )
+                print(f"DIAG hidratación: {hidratacion}")
+            except Exception as error_hidratacion:
+                print(
+                    f"DIAG hidratación: no se pudo evaluar "
+                    f"({type(error_hidratacion).__name__})."
+                )
             await diagnosticar_sesion_starvios(pagina, actor["name"])
+            if diagnostico_errores:
+                print("--- Errores del navegador ---")
+                for linea in diagnostico_errores[-30:]:
+                    print(linea)
             if diagnostico_consola:
                 print("--- Diagnóstico del navegador ---")
                 for linea in diagnostico_consola[-40:]:
