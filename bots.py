@@ -52,6 +52,7 @@ GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "").strip()
 AUDIO_SOURCE_VALIDATED = os.environ.get("AUDIO_SOURCE_VALIDATED", "false").strip().lower() == "true"
 AUDIO_BRIDGE_URL = os.environ.get("AUDIO_BRIDGE_URL", "").strip().rstrip("/")
 AUDIO_BRIDGE_TOKEN = os.environ.get("AUDIO_BRIDGE_TOKEN", "").strip()
+INITIAL_MESSAGE = os.environ.get("INITIAL_MESSAGE", "").strip().replace("\n", " ")[:200]
 BOT_NAME = "Mari1565"
 BOT_ALIASES = ("Mari", "Mari1565", "María", "María Fernanda", "Mafer")
 SEBAS_NAME = "sebasdark"
@@ -927,6 +928,28 @@ async def publicar_y_verificar(
         print("⚠️ CHAT_MESSAGE_SELECTOR no está configurado; no se pudo verificar visualmente.")
 
 
+async def enviar_saludo_inicial(actor: dict, estado: dict) -> None:
+    """Envía una sola vez el saludo configurado al entrar Mari en modo real."""
+    if DRY_RUN or not INITIAL_MESSAGE or INTERACTION_MODE == "silent":
+        return
+    if actor.get("id") != "mari":
+        return
+    huella = hashlib.sha256(
+        f"{actor['label']} {INITIAL_MESSAGE}".casefold().encode("utf-8")
+    ).hexdigest()
+    if any(e.get("fingerprint") == huella for e in estado.get("sent", [])):
+        print("⏭️ El saludo inicial ya se envió recientemente; no se repite.")
+        return
+    permitido, razon = puede_publicar(estado, actor["id"])
+    if not permitido:
+        print(f"⏭️ No se envía el saludo inicial: {razon}")
+        return
+    print(f"👋 Enviando saludo inicial de {actor['name']}...")
+    await publicar_y_verificar(
+        actor["page"], INITIAL_MESSAGE, estado, actor["id"], actor["label"]
+    )
+
+
 def actor_mencionado(
     textos: list[str], actores_disponibles: set[str] | None = None
 ) -> str | None:
@@ -1683,6 +1706,8 @@ async def ciclo_bot() -> None:
                         and ahora_mono >= inicio_programa + actor["join_after"]
                     ):
                         await abrir_sesion_actor(navegador, actor, actores)
+                        if actor_id == "mari":
+                            await enviar_saludo_inicial(actor, estado)
                         if actor_id == "mari" and "sebas" in actores:
                             actores["sebas"]["join_after"] = (
                                 actor["started"] - inicio_programa + delay_sebas * 60
