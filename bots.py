@@ -630,7 +630,17 @@ def decidir_interaccion(
         return False, "Modo silencioso.", []
     if modo == "solo_mari":
         llamada_a_mari = "mari" in disponibles and contiene_alias(transcripcion, BOT_ALIASES)
-        return llamada_a_mari, "llamada_directa_a_mari", mensajes_nuevos if llamada_a_mari else []
+        mensajes_a_mari = [
+            f for f in mensajes_nuevos
+            if "mari" in disponibles and contiene_alias(f["texto"], BOT_ALIASES)
+        ]
+        if llamada_a_mari or mensajes_a_mari:
+            return True, "llamada_directa_a_mari", mensajes_a_mari or mensajes_nuevos
+        if pregunta_abierta:
+            return True, "pregunta_abierta_al_chat", mensajes_nuevos
+        if proactivo_listo and transcripcion.strip():
+            return True, "comentario_contextual_del_stream", mensajes_nuevos
+        return False, "Aún no hay llamada, pregunta ni comentario contextual pendiente.", []
     if modo == "solo_sebas":
         llamada_a_sebas = "sebas" in disponibles and contiene_alias(transcripcion, SEBAS_ALIASES)
         mensajes_a_sebas = [
