@@ -110,6 +110,7 @@ jobs:
       MAX_MESSAGES_PER_6H: ${{ inputs.max_messages_per_6h }}
       GITHUB_TOKEN: ${{ github.token }}
       GITHUB_REPOSITORY: ${{ github.repository }}
+      PYTHONUNBUFFERED: '1'
     steps:
       - name: Checkout del código
         uses: actions/checkout@v4
