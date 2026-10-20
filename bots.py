@@ -1138,6 +1138,55 @@ async def diagnosticar_sesion_starvios(pagina, etiqueta: str) -> None:
         print(f"DIAG sesión {etiqueta}: no se pudo evaluar ({type(error).__name__}).")
 
 
+async def esperar_sesion_starvios_activa(pagina) -> bool:
+    """Wait until the SPA header reflects the logged-in user before navigating internally."""
+    try:
+        await pagina.wait_for_function(
+            """() => Boolean(
+                document.querySelector('a[href="/studio"]') ||
+                document.querySelector('a[href^="/settings"]')
+            )""",
+            timeout=15_000,
+        )
+        return True
+    except PlaywrightError:
+        print("DIAG: no se confirmó el estado logueado en la interfaz; se intentará igualmente.")
+        return False
+
+
+async def navegar_sin_recarga(pagina, url: str) -> bool:
+    """Navigate inside the Starvios SPA so the in-memory session survives."""
+    ruta = urlparse(url).path or "/"
+    try:
+        await pagina.wait_for_function(
+            "() => location.hostname === 'starvios.com' "
+            "|| location.hostname.endsWith('.starvios.com')",
+            timeout=10_000,
+        )
+        await pagina.wait_for_timeout(800)
+        resultado = await pagina.evaluate(
+            """(ruta) => {
+                try {
+                    history.pushState({}, '', ruta);
+                    window.dispatchEvent(new PopStateEvent('popstate', { state: history.state }));
+                    return location.pathname;
+                } catch (error) {
+                    return 'error:' + String(error);
+                }
+            }""",
+            ruta,
+        )
+        print(f"DIAG navegación interna a {resultado}.")
+        await pagina.wait_for_timeout(4000)
+        return resultado == ruta
+    except PlaywrightError as error:
+        print(
+            f"DIAG navegación interna falló ({type(error).__name__}); "
+            "se usará una recarga completa."
+        )
+        return False
+
+
 async def abrir_sesion_actor(navegador, actor: dict, actores: dict) -> None:
     contexto = await navegador.new_context(
         viewport={"width": 1366, "height": 768}, locale="es-PE", timezone_id="America/Lima"
@@ -1182,8 +1231,10 @@ async def abrir_sesion_actor(navegador, actor: dict, actores: dict) -> None:
     await contexto.add_init_script(script=SCRIPT_DIAGNOSTICO_STARVIOS)
 
     sesion_json = None
+    sesion_por_formulario = False
     if actor["email"] and actor["password"]:
         sesion_json = await iniciar_sesion_en_formulario(pagina, actor)
+        sesion_por_formulario = bool(sesion_json)
 
     if not sesion_json:
         if actor["email"] and actor["password"]:
@@ -1217,7 +1268,12 @@ async def abrir_sesion_actor(navegador, actor: dict, actores: dict) -> None:
             f"⚠️ La sesión de {actor['name']} está caducada o caduca pronto; "
             "Supabase intentará renovarla con el refresh_token."
         )
-    await pagina.goto(URL, wait_until="domcontentloaded", timeout=30_000)
+    navegado_en_spa = False
+    if sesion_por_formulario:
+        await esperar_sesion_starvios_activa(pagina)
+        navegado_en_spa = await navegar_sin_recarga(pagina, URL)
+    if not navegado_en_spa:
+        await pagina.goto(URL, wait_until="domcontentloaded", timeout=30_000)
     await pagina.wait_for_timeout(8_000)
     entrada = pagina.locator(CHAT_INPUT_SELECTOR)
     try:
