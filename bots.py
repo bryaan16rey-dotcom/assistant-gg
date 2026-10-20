@@ -1689,11 +1689,12 @@ async def abrir_sesion_actor(navegador, actor: dict, actores: dict) -> None:
     # seguidores con bots o cuentas falsas.
     actor["started"] = time.monotonic()
     actor["started_at_epoch"] = time.time()
-    actor["first_cooldown_seconds"] = random.randint(*rango_pausa_actor(actor["id"]))
+    actor["first_cooldown_seconds"] = random.randint(2 * 60, 4 * 60)
     actor["ends"] = actor["started"] + actor["duration_minutes"] * 60
     actor["active"] = True
     print(
         f"✅ {actor['name']} activo durante {actor['duration_minutes']} min; "
+        f"primer turno espontáneo en ~{actor['first_cooldown_seconds'] // 60} min; "
         f"personalidad={actor['personality']}; intervalo habitual "
         f"{rango_pausa_actor(actor['id'])[0] // 60}–{rango_pausa_actor(actor['id'])[1] // 60} min."
     )
