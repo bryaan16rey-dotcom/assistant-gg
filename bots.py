@@ -1689,7 +1689,7 @@ async def abrir_sesion_actor(navegador, actor: dict, actores: dict) -> None:
     # seguidores con bots o cuentas falsas.
     actor["started"] = time.monotonic()
     actor["started_at_epoch"] = time.time()
-    actor["first_cooldown_seconds"] = random.randint(2 * 60, 4 * 60)
+    actor["first_cooldown_seconds"] = random.randint(30, 60)
     actor["ends"] = actor["started"] + actor["duration_minutes"] * 60
     actor["active"] = True
     print(
@@ -1708,7 +1708,7 @@ async def ciclo_bot() -> None:
     }
     # Con un saludo inicial configurado, Mari entra de inmediato para poder
     # validar el chat sin esperar el turno aleatorio habitual.
-    delay_primer = 0 if (INITIAL_MESSAGE or AI_GREETING) else random.randint(2, 5)
+    delay_primer = 0 if (INITIAL_MESSAGE or AI_GREETING or INTERACTION_MODE == "solo_mari") else random.randint(2, 5)
     duracion_mari = random.randint(50, 65)
     duracion_sebas = random.randint(50, 65)
     delay_sebas = random.randint(19, 25)
