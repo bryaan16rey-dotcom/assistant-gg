@@ -13,7 +13,7 @@ from collections import deque
 from pathlib import Path
 from urllib.parse import quote, urlparse
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 from groq import Groq
 from playwright.async_api import Error as PlaywrightError
@@ -74,6 +74,16 @@ MARI_COOLDOWN_RANGE_SECONDS = (8 * 60, 12 * 60)
 SEBAS_COOLDOWN_RANGE_SECONDS = (13 * 60, 17 * 60)
 SHARED_MIN_GAP_SECONDS = 3 * 60
 STATE_ARTIFACT_NAME = "assistant-gg-rate-limit-state"
+
+
+class RedirectSinAutorizacion(HTTPRedirectHandler):
+    """No reenvía el token de GitHub al blob firmado de Azure."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        nueva = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if nueva is not None and urlparse(newurl).netloc != urlparse(req.full_url).netloc:
+            nueva.remove_header("Authorization")
+        return nueva
 
 
 class AudioCaptureUnavailable(RuntimeError):
@@ -422,7 +432,7 @@ def cargar_estado_persistente() -> dict:
         solicitud = Request(artefacto["archive_download_url"], headers={
             "Authorization": f"Bearer {GITHUB_TOKEN}", "User-Agent": "assistant-gg-rate-limit"
         })
-        with urlopen(solicitud, timeout=30) as respuesta:
+        with build_opener(RedirectSinAutorizacion).open(solicitud, timeout=30) as respuesta:
             archivo_zip = respuesta.read()
         with zipfile.ZipFile(io.BytesIO(archivo_zip)) as comprimido:
             estado = json.loads(comprimido.read("rate_limit_state.json"))
