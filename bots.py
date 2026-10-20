@@ -505,10 +505,13 @@ async def inspeccionar_estado_stream(pagina) -> dict:
     """Busca señales visibles de reproducción en la página pública del directo."""
     js = r"""() => {
       const videos = [...document.querySelectorAll('video')];
-      const activos = videos.filter(v => !v.ended && !v.paused && v.readyState >= 2);
+      // En Chromium headless el autoplay puede quedar bloqueado aunque el
+      // reproductor exista. Para el bot basta con que el player siga montado:
+      // el audio llega por el puente de OBS y el chat es independiente.
+      const activos = videos.filter(v => !v.ended && !v.error);
       const texto = (document.body?.innerText || '').toLowerCase();
       const offline = /directo (ha )?terminado|stream (has )?ended|este canal no está en directo|no está en directo|transmisión finalizada/.test(texto);
-      return {active: activos.length > 0, videoCount: videos.length, offline};
+      return {active: !offline && activos.length > 0, videoCount: videos.length, offline};
     }"""
     for frame in pagina.frames:
         try:
@@ -920,10 +923,16 @@ async def publicar_y_verificar(
     registrar_publicacion(estado, texto_publico, actor_id)
     print("📤 Envío solicitado; verificando que aparezca en el chat...")
     if mensajes is not None:
-        await mensajes.filter(has_text=texto_publico).last.wait_for(
-            state="visible", timeout=12_000
-        )
-        print("✅ Mensaje confirmado en el chat.")
+        try:
+            await mensajes.filter(has_text=texto_publico).last.wait_for(
+                state="visible", timeout=12_000
+            )
+            print("✅ Mensaje confirmado en el chat.")
+        except PlaywrightError:
+            print(
+                "⚠️ El mensaje se envió, pero no se pudo confirmar visualmente "
+                "con CHAT_MESSAGE_SELECTOR."
+            )
     else:
         print("⚠️ CHAT_MESSAGE_SELECTOR no está configurado; no se pudo verificar visualmente.")
 
@@ -1587,7 +1596,9 @@ async def ciclo_bot() -> None:
         "dry_run": DRY_RUN, "estado_stream": "en observación",
         "contadores": {}, "eventos": [],
     }
-    delay_primer = random.randint(2, 5)
+    # Con un saludo inicial configurado, Mari entra de inmediato para poder
+    # validar el chat sin esperar el turno aleatorio habitual.
+    delay_primer = 0 if INITIAL_MESSAGE else random.randint(2, 5)
     duracion_mari = random.randint(50, 65)
     duracion_sebas = random.randint(50, 65)
     delay_sebas = random.randint(19, 25)
@@ -1635,6 +1646,7 @@ async def ciclo_bot() -> None:
             memoria_audio = deque()
             memoria_chat = deque()
             stream_sin_senal_desde = None
+            ultimo_estado_video = None
             audio_capture_warning_logged = False
             # En una prueba se abren de inmediato las sesiones configuradas;
             # no se publica y la ejecución termina tras generar un borrador.
@@ -1689,6 +1701,18 @@ async def ciclo_bot() -> None:
                 await pagina.wait_for_timeout(POLL_INTERVAL_SECONDS * 1_000)
                 ahora_mono = time.monotonic()
                 estado_video = await inspeccionar_estado_stream(pagina)
+                clave_video = (
+                    estado_video.get("active"),
+                    estado_video.get("videoCount"),
+                    estado_video.get("offline"),
+                )
+                if clave_video != ultimo_estado_video:
+                    print(
+                        f"🎥 Reproductor: activo={estado_video.get('active')}, "
+                        f"videos={estado_video.get('videoCount')}, "
+                        f"offline={estado_video.get('offline')}"
+                    )
+                    ultimo_estado_video = clave_video
                 if estado_video["active"]:
                     stream_sin_senal_desde = None
                 elif stream_sin_senal_desde is None:
