@@ -808,6 +808,36 @@ async def transcribir_audio_puente(pagina, cliente: Groq) -> str:
         try:
             respuesta_ack = await asyncio.to_thread(urlopen, confirmar, timeout=15)
             respuesta_ack.close()
+        except HTTPError as error:
+            if error.code != 404:
+                raise RuntimeError(
+                    f"No se pudo confirmar el consumo del audio (HTTP {error.code})."
+                ) from error
+
+            # El puente conserva el fragmento mientras Groq lo transcribe. Si
+            # la cola estaba llena, puede descartar ese fragmento antes del ACK.
+            # En ese caso no hay nada que reintentar: verifica que la cabeza ya
+            # avanzó. Si sigue siendo el mismo ID, el 404 sí indica un endpoint
+            # incompatible y se detiene para no retranscribirlo indefinidamente.
+            verificar = Request(
+                f"{AUDIO_BRIDGE_URL}/v1/audio/next",
+                headers={"Authorization": f"Bearer {AUDIO_BRIDGE_TOKEN}"},
+            )
+            try:
+                respuesta_verificacion = await asyncio.to_thread(urlopen, verificar, timeout=15)
+                with respuesta_verificacion:
+                    siguiente_id = respuesta_verificacion.headers.get("X-Audio-Id", "")
+                    cola_vacia = respuesta_verificacion.status == 204
+            except Exception as error_verificacion:
+                raise RuntimeError(
+                    "El ACK del audio dio 404 y no se pudo comprobar si la cola avanzó."
+                ) from error_verificacion
+            if not cola_vacia and siguiente_id == audio_id:
+                raise RuntimeError(
+                    "El puente rechazó el ACK y el fragmento sigue en cola; "
+                    "no se continuará para evitar transcribirlo repetidamente."
+                ) from error
+            print("⚠️ El puente ya había descartado el fragmento durante la transcripción; continúo con el siguiente.")
         except Exception as error:
             raise RuntimeError(
                 f"No se pudo confirmar el consumo del audio ({type(error).__name__})."
