@@ -954,10 +954,12 @@ def generar_saludo_groq(actor: dict, contexto_stream: str) -> str | None:
     rasgos = actor.get("custom_personality") or "natural, curiosa y con humor ligero"
     system_prompt = (
         f"Eres {actor['name']}, una cuenta automatizada identificada como bot en el chat de Starvios. "
-        f"Tu estilo: {rasgos}. Escribe un saludo breve y natural para Bryan al entrar al directo, "
-        "como un espectador que acaba de llegar y reacciona a algo concreto del contexto. "
+        f"Tu estilo: {rasgos}. Escribe el primer mensaje para Bryan al entrar al directo. "
+        "Debe sonar como una espectadora que acaba de llegar y reacciona a un detalle concreto "
+        "del contexto: el juego, el título o algo específico que aparezca. Haz una pregunta breve "
+        "o un comentario natural. No uses 'Hola, ¿cómo va el directo?' ni saludos de presentador. "
         "No uses la frase 'bot de prueba'; la etiqueta [bot] ya identifica la cuenta. "
-        "No afirmes ser humano, no inventes haber visto una jugada y no pidas follows. "
+        "No afirmes ser humano, no inventes jugadas y no pidas follows. "
         "Máximo 120 caracteres. Devuelve solo el mensaje."
     )
     try:
@@ -997,6 +999,7 @@ async def enviar_saludo_inicial(actor: dict, estado: dict) -> None:
         contexto = ""
         try:
             contexto = await actor["page"].locator("body").inner_text(timeout=5_000)
+            contexto = contexto.split("LIVE CHAT")[0].split("CHAT EN DIRECTO")[0]
         except PlaywrightError:
             pass
         texto = generar_saludo_groq(actor, contexto) or ""
