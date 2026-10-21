@@ -17,16 +17,6 @@ on:
         description: 'URL https://*.trycloudflare.com que muestra cloudflared en tu PC'
         required: true
         type: string
-      initial_message:
-        description: 'Texto fijo literal (no usa personalidad); déjalo vacío para esperar una reacción contextual'
-        required: false
-        default: ''
-        type: string
-      ai_greeting:
-        description: 'Enviar un mensaje contextual de entrada para Mari y Sebas (si initial_message está vacío)'
-        required: false
-        default: true
-        type: boolean
       personality:
         description: 'Estilo conversacional de Mari'
         required: true
@@ -45,7 +35,7 @@ on:
       personality_notes:
         description: 'Rasgos para el estilo propio de Mari (opcional)'
         required: false
-        default: 'curiosa y compañera; comenta una idea concreta, usa jerga peruana con moderación y hace preguntas específicas cuando nacen del contexto'
+        default: 'cálida, curiosa y observadora; cercana sin exagerar, con humor ligero ocasional; escribe corto, casual y en minúscula como chat peruano; no suena a presentadora ni fuerza preguntas o jerga'
         type: string
       personality_sebas:
         description: 'Estilo conversacional de Sebas'
@@ -124,8 +114,6 @@ jobs:
       AUDIO_SOURCE_VALIDATED: ${{ inputs.audio_source_validated || 'false' }}
       AUDIO_BRIDGE_URL: ${{ inputs.audio_bridge_url }}
       AUDIO_BRIDGE_TOKEN: ${{ secrets.AUDIO_BRIDGE_TOKEN }}
-      INITIAL_MESSAGE: ${{ inputs.initial_message }}
-      AI_GREETING: ${{ inputs.ai_greeting || 'false' }}
       PERSONALITY: ${{ inputs.personality }}
       CUSTOM_PERSONALITY: ${{ inputs.personality_notes }}
       PERSONALITY_SEBAS: ${{ inputs.personality_sebas }}
