@@ -589,7 +589,33 @@ def puede_publicar(
     return True, ""
 
 
-def registrar_publicacion(estado: dict, texto: str, actor_id: str) -> None:
+def huella_mensaje(texto: str, actor: dict) -> str:
+    """Identifica un mensaje por cuenta, nombre, etiqueta interna y contenido."""
+    identidad = "\0".join((
+        str(actor.get("id", "")).strip().casefold(),
+        str(actor.get("name", "")).strip().casefold(),
+        str(actor.get("label", "")).strip().casefold(),
+    ))
+    contenido = normalizar_mensaje(texto).casefold()
+    return hashlib.sha256(f"{identidad}\0{contenido}".encode("utf-8")).hexdigest()
+
+
+def huellas_compatibles_mensaje(texto: str, actor: dict) -> set[str]:
+    """Incluye huellas antiguas para no repetir mensajes tras actualizar el código."""
+    contenido = texto[:280]
+    antiguas = {
+        contenido,
+        f"{actor.get('label', '')} {texto}"[:280],
+        f"{'Mari1565 (bot):' if actor.get('id') == 'mari' else 'sebasdark (bot):'} {texto}"[:280],
+    }
+    return {
+        huella_mensaje(texto, actor),
+        *(hashlib.sha256(valor.casefold().encode("utf-8")).hexdigest() for valor in antiguas),
+    }
+
+
+def registrar_publicacion(estado: dict, texto: str, actor: dict) -> None:
+    actor_id = actor["id"]
     intervalo = random.randint(*(
         MARI_COOLDOWN_RANGE_SECONDS if actor_id == "mari" else SEBAS_COOLDOWN_RANGE_SECONDS
     ))
@@ -598,7 +624,7 @@ def registrar_publicacion(estado: dict, texto: str, actor_id: str) -> None:
         "actor": actor_id,
         "cooldown_seconds": intervalo,
         "shared_gap_seconds": random.randint(*SHARED_GAP_RANGE_SECONDS),
-        "fingerprint": hashlib.sha256(texto.casefold().encode("utf-8")).hexdigest(),
+        "fingerprint": huella_mensaje(texto, actor),
     })
     guardar_estado_persistente(estado)
 
@@ -1111,9 +1137,10 @@ async def seguir_streamer(pagina) -> None:
 
 
 async def publicar_y_verificar(
-    pagina, texto: str, estado: dict, actor_id: str, etiqueta: str,
+    pagina, texto: str, estado: dict, actor: dict,
     llamada_directa_por_voz: bool = False,
 ) -> bool:
+    actor_id = actor["id"]
     entrada, selector_entrada = await localizar_campo_chat(pagina)
     if entrada is None:
         raise RuntimeError("No se encontró el campo de chat en Starvios.")
@@ -1122,7 +1149,7 @@ async def publicar_y_verificar(
     await entrada.wait_for(state="visible", timeout=15_000)
     print(f"🎯 Campo de chat localizado con: {selector_entrada}")
     await entrada.fill("")
-    texto_publico = f"{etiqueta} {texto}"[:280]
+    texto_publico = f"{texto}"[:280]
     await entrada.fill(texto_publico)
 
     if DRY_RUN:
@@ -1141,7 +1168,7 @@ async def publicar_y_verificar(
     print(f"📤 Botón de envío localizado con: {selector_boton}")
     await boton.click()
     # Registrar después de solicitar el envío evita duplicados si falla la verificación.
-    registrar_publicacion(estado, texto_publico, actor_id)
+    registrar_publicacion(estado, texto_publico, actor)
     print("📤 Envío solicitado; verificando que aparezca en el chat...")
     if mensajes is not None:
         try:
@@ -1172,13 +1199,12 @@ async def enviar_saludo_inicial(actor: dict, estado: dict, resumen: dict) -> Non
     huellas_usadas = {e.get("fingerprint") for e in estado.get("sent", [])}
     opciones_disponibles = [
         opcion for opcion in GREETING_OPTIONS
-        if hashlib.sha256(f"{actor['label']} {opcion}".casefold().encode("utf-8")).hexdigest()
-        not in huellas_usadas
+        if not huellas_compatibles_mensaje(opcion, actor).intersection(huellas_usadas)
     ]
     texto = random.choice(opciones_disponibles or GREETING_OPTIONS)
     print(f"👋 Enviando saludo de entrada aleatorio de {actor['name']}...")
     confirmado = await publicar_y_verificar(
-        actor["page"], texto, estado, actor["id"], actor["label"]
+        actor["page"], texto, estado, actor
     )
     if confirmado:
         registrar_evento(resumen, "enviados", f"Mensaje de entrada confirmado de {actor['name']}.")
@@ -1846,7 +1872,7 @@ async def ciclo_bot() -> None:
             "name": BOT_NAME, "aliases": BOT_ALIASES,
             "email": STARVIOS_EMAIL_MARI, "password": STARVIOS_PASSWORD_MARI,
             "session": STARVIOS_SESSION_COOKIE,
-            "label": "Mari1565 (bot):", "personality": PERSONALITY,
+            "label": "", "personality": PERSONALITY,
             "custom_personality": CUSTOM_PERSONALITY,
             "join_after": delay_primer * 60, "duration_minutes": duracion_mari,
             "context": None, "page": None, "active": False,
@@ -1857,7 +1883,7 @@ async def ciclo_bot() -> None:
             "name": SEBAS_NAME, "aliases": SEBAS_ALIASES,
             "email": STARVIOS_EMAIL_SEBAS, "password": STARVIOS_PASSWORD_SEBAS,
             "session": STARVIOS_SESSION_COOKIE_2,
-            "label": "sebasdark (bot):", "personality": PERSONALITY_SEBAS,
+            "label": "", "personality": PERSONALITY_SEBAS,
             "custom_personality": CUSTOM_PERSONALITY_SEBAS,
             "join_after": None if "mari" in actores else delay_primer * 60,
             "duration_minutes": duracion_sebas,
@@ -2129,15 +2155,13 @@ async def ciclo_bot() -> None:
                     print("🛑 No se envía: revisa primero en DRY_RUN que la transcripción corresponda al streamer.")
                     registrar_evento(resumen, "omitidos", "Bloqueado: la fuente de audio no fue validada.")
                     continue
-                huella = hashlib.sha256(
-                    f"{actor['label']} {frase}".casefold().encode("utf-8")
-                ).hexdigest()
-                if any(e.get("fingerprint") == huella for e in estado.get("sent", [])):
+                huellas = huellas_compatibles_mensaje(frase, actor)
+                if any(e.get("fingerprint") in huellas for e in estado.get("sent", [])):
                     print("⏭️ Respuesta duplicada recientemente; no se envía.")
                     registrar_evento(resumen, "duplicados", "Mensaje idéntico reciente omitido.")
                     continue
                 confirmado = await publicar_y_verificar(
-                    actor["page"], frase, estado, actor_id, actor["label"],
+                    actor["page"], frase, estado, actor,
                     llamada_directa_por_voz=(motivo == "llamada_directa_por_voz"),
                 )
                 if motivo == "comentario_contextual_del_stream":
