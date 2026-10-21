@@ -23,9 +23,9 @@ on:
         default: ''
         type: string
       ai_greeting:
-        description: 'Generar el saludo inicial con IA si initial_message está vacío'
+        description: 'Enviar un mensaje contextual de entrada para Mari y Sebas (si initial_message está vacío)'
         required: false
-        default: false
+        default: true
         type: boolean
       personality:
         description: 'Estilo conversacional de Mari'

@@ -1035,7 +1035,17 @@ async def localizar_boton_envio(pagina, campo):
 
 
 async def seguir_streamer(pagina) -> None:
-    """Intenta seguir al streamer automáticamente si el botón de seguir está disponible."""
+    """Sigue al streamer si falta y confirma el estado visible después del clic."""
+    indicadores_siguiendo = (
+        'button:has-text("Siguiendo")',
+        'button:has-text("Following")',
+        'button:has-text("Dejar de seguir")',
+        'button:has-text("Unfollow")',
+        'button[aria-label*="Siguiendo"]',
+        'button[aria-label*="Following"]',
+        'button[aria-label*="Dejar de seguir"]',
+        'button[aria-label*="Unfollow"]',
+    )
     candidatos_seguir = [
         'button:has-text("Seguir")',
         'button:has-text("Follow")',
@@ -1044,23 +1054,47 @@ async def seguir_streamer(pagina) -> None:
         '.follow-button',
         'button.follow'
     ]
+
+    async def ya_sigue() -> bool:
+        for selector in indicadores_siguiendo:
+            try:
+                botones = pagina.locator(selector)
+                for indice in range(await botones.count()):
+                    if await botones.nth(indice).is_visible():
+                        return True
+            except PlaywrightError:
+                continue
+        return False
+
+    if await ya_sigue():
+        print("✅ Estado de seguimiento confirmado: el bot ya sigue al streamer.")
+        return
+
     for selector in candidatos_seguir:
         try:
             localizador = pagina.locator(selector)
             if await localizador.count() > 0:
                 btn = localizador.first
                 if await btn.is_visible():
-                    texto_btn = (await btn.inner_text() or "").lower()
-                    if "siguiendo" in texto_btn or "following" in texto_btn:
-                        print("✅ El bot ya sigue al streamer.")
+                    texto_btn = (await btn.inner_text() or "").casefold()
+                    aria_btn = (await btn.get_attribute("aria-label") or "").casefold()
+                    estado_btn = f"{texto_btn} {aria_btn}"
+                    if any(marca in estado_btn for marca in (
+                        "siguiendo", "following", "dejar de seguir", "unfollow"
+                    )):
+                        print("✅ Estado de seguimiento confirmado: el bot ya sigue al streamer.")
                         return
                     await btn.click()
-                    print("✅ ¡Botón de seguir presionado con éxito!")
-                    await pagina.wait_for_timeout(1000)
+                    for _ in range(20):
+                        await pagina.wait_for_timeout(250)
+                        if await ya_sigue():
+                            print("✅ Seguimiento confirmado después de pulsar el botón.")
+                            return
+                    print("⚠️ Se pulsó Seguir, pero Starvios no confirmó el nuevo estado.")
                     return
         except Exception:
             continue
-    print("⚠️ No se encontró un botón de seguir visible (o ya se sigue al canal).")
+    print("⚠️ No se pudo confirmar el seguimiento: no apareció el botón ni un estado de seguimiento.")
 
 
 async def publicar_y_verificar(
@@ -1120,13 +1154,13 @@ def generar_saludo_groq(actor: dict, contexto_stream: str) -> str | None:
     rasgos = actor.get("custom_personality") or "natural, curiosa y con humor ligero"
     system_prompt = (
         f"Eres {actor['name']}, una cuenta automatizada identificada como bot en el chat de Starvios. "
-        f"Tu estilo: {rasgos}. Escribe el primer mensaje para Bryan al entrar al directo. "
-        "Debe sonar como una espectadora que acaba de llegar y reacciona a un detalle concreto "
-        "del contexto: el juego, el título o algo específico que aparezca. Haz una pregunta breve "
-        "o un comentario natural. No uses 'Hola, ¿cómo va el directo?' ni saludos de presentador. "
-        "No hace falta repetir que eres un bot en el texto: la etiqueta visible ya lo indica. "
-        "Si te preguntan, responde con honestidad. No afirmes ser humana, no inventes jugadas y no pidas follows. "
-        "Máximo 120 caracteres. Devuelve solo el mensaje."
+        f"Tu estilo: {rasgos}. Escribe una sola intervención corta para Bryan al entrar al directo. "
+        "Usa un detalle concreto del título, juego o contexto visible en los datos recibidos; si solo hay título, "
+        "reacciona a ese título sin fingir que viste una jugada. Que suene casual, no como presentadora ni saludo "
+        "genérico; evita 'hola, ¿cómo va el directo?' y no preguntes por preguntar. No inventes detalles. "
+        "La etiqueta visible identifica la cuenta automatizada; no afirmes ser humana ni pidas follows. "
+        "No devuelvas SKIP salvo que el contexto esté completamente vacío o ilegible. Máximo 120 caracteres. "
+        "Devuelve solo el mensaje."
     )
     try:
         respuesta = cliente.chat.completions.create(
@@ -1149,19 +1183,18 @@ def generar_saludo_groq(actor: dict, contexto_stream: str) -> str | None:
 
 
 async def enviar_saludo_inicial(actor: dict, estado: dict, resumen: dict) -> None:
-    """Envía una sola vez un saludo al entrar Mari: fijo o generado por IA."""
+    """Envía al entrar un mensaje contextual y etiquetado de cada cuenta."""
     if DRY_RUN or INTERACTION_MODE == "silent":
         return
-    if not (INITIAL_MESSAGE or AI_GREETING):
-        return
-    if actor.get("id") != "mari":
+    mensaje_fijo_mari = bool(INITIAL_MESSAGE) and actor.get("id") == "mari"
+    if not (mensaje_fijo_mari or AI_GREETING):
         return
     permitido, razon = puede_publicar(estado, actor["id"])
     if not permitido:
-        print(f"⏭️ No se envía el saludo inicial: {razon}")
+        print(f"⏭️ No se envía el mensaje de entrada de {actor['name']}: {razon}")
         return
-    texto = INITIAL_MESSAGE
-    if not texto:
+    texto = INITIAL_MESSAGE if mensaje_fijo_mari else ""
+    if not texto and AI_GREETING:
         contexto = ""
         try:
             contexto = await actor["page"].locator("body").inner_text(timeout=5_000)
@@ -1170,24 +1203,24 @@ async def enviar_saludo_inicial(actor: dict, estado: dict, resumen: dict) -> Non
             pass
         texto = generar_saludo_groq(actor, contexto) or ""
     if not texto:
-        print("⏭️ La IA no generó un saludo inicial; no se envía plantilla genérica.")
+        print(f"⏭️ La IA no generó un mensaje contextual de entrada para {actor['name']}.")
         return
     huella = hashlib.sha256(
         f"{actor['label']} {texto}".casefold().encode("utf-8")
     ).hexdigest()
     if any(e.get("fingerprint") == huella for e in estado.get("sent", [])):
-        print("⏭️ El saludo inicial ya se envió recientemente; no se repite.")
+        print(f"⏭️ El mensaje de entrada de {actor['name']} ya se envió recientemente; no se repite.")
         return
-    print(f"👋 Enviando saludo inicial de {actor['name']}...")
+    print(f"👋 Enviando mensaje contextual de entrada de {actor['name']}...")
     confirmado = await publicar_y_verificar(
         actor["page"], texto, estado, actor["id"], actor["label"]
     )
     if confirmado:
-        registrar_evento(resumen, "enviados", f"Saludo inicial confirmado de {actor['name']}.")
+        registrar_evento(resumen, "enviados", f"Mensaje de entrada confirmado de {actor['name']}.")
     else:
         registrar_evento(
             resumen, "no_confirmados",
-            f"Se solicitó el saludo inicial de {actor['name']}, pero no se confirmó visualmente.",
+            f"Se solicitó el mensaje de entrada de {actor['name']}, pero no se confirmó visualmente.",
         )
 
 
@@ -1834,9 +1867,9 @@ async def ciclo_bot() -> None:
         "dry_run": DRY_RUN, "estado_stream": "en observación",
         "contadores": {}, "eventos": [],
     }
-    # Con un saludo inicial configurado, Mari entra de inmediato para poder
-    # validar el chat sin esperar el turno aleatorio habitual.
-    delay_primer = 0 if (INITIAL_MESSAGE or AI_GREETING or INTERACTION_MODE == "solo_mari") else random.randint(2, 5)
+    # Conserva la llegada aleatoria incluso cuando cada cuenta publicará una
+    # intervención contextual al entrar.
+    delay_primer = 0 if INTERACTION_MODE == "solo_mari" else random.randint(2, 5)
     duracion_mari = random.randint(55, 65)
     duracion_sebas = random.randint(35, 45)
     delay_sebas = random.randint(19, 25)
@@ -1971,8 +2004,7 @@ async def ciclo_bot() -> None:
                         and ahora_mono >= inicio_programa + actor["join_after"]
                     ):
                         await abrir_sesion_actor(navegador, actor, actores)
-                        if actor_id == "mari":
-                            await enviar_saludo_inicial(actor, estado, resumen)
+                        await enviar_saludo_inicial(actor, estado, resumen)
                         if actor_id == "mari" and "sebas" in actores:
                             actores["sebas"]["join_after"] = (
                                 actor["started"] - inicio_programa + delay_sebas * 60
